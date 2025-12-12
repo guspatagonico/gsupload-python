@@ -17,7 +17,8 @@ gsupload = "gsupload:main"
 
 [project.optional-dependencies]
 dev = [
-    "commitizen"
+    "commitizen",
+    "pre-commit"
 ]
 
 [tool.setuptools]
