@@ -158,9 +158,11 @@ def list_remote_sftp(
     remote_base = remote_basepath.rstrip("/")
 
     # Set keepalive to prevent timeout
-    transport = sftp.get_channel().get_transport()
-    if transport:
-        transport.set_keepalive(30)
+    channel = sftp.get_channel()
+    if channel:
+        transport = channel.get_transport()
+        if transport:
+            transport.set_keepalive(30)
 
     def list_directory(path: str):
         try:
@@ -176,7 +178,7 @@ def list_remote_sftp(
                 try:
                     import stat
 
-                    if stat.S_ISDIR(entry.st_mode):
+                    if entry.st_mode is not None and stat.S_ISDIR(entry.st_mode):
                         list_directory(full_path)
                     else:
                         # Calculate relative path from remote_basepath
@@ -496,7 +498,7 @@ def display_visual_comparison(
         if protocol == "ftp":
             ftp = ftplib.FTP()
             ftp.connect(hostname, port, timeout=60)
-            ftp.login(username, password)
+            ftp.login(username, password or "")
 
             click.echo("📡 Listing remote files...")
             remote_files = list_remote_ftp(ftp, remote_basepath, timeout=60)
