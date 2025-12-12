@@ -121,6 +121,9 @@ gsupload [OPTIONS] PATTERNS... HOST_ALIAS
 
 **Options:**
 - `-r, --recursive` - Search for files recursively in subdirectories when using glob patterns
+- `-vc, --visual-check` - Display tree comparison of local vs remote files before uploading
+- `--max-depth` - Maximum tree depth to display in visual check (default: 8)
+- `-ts, --tree-summary` - Show summary statistics only, skip tree display in visual check
 
 **Arguments:**
 - `PATTERNS` - One or more file patterns, filenames, or directories to upload
@@ -136,6 +139,21 @@ gsupload *.css frontend
 Upload all CSS files recursively (including subdirectories):
 ```bash
 gsupload -r *.css frontend
+```
+
+Preview changes before uploading with visual tree comparison:
+```bash
+gsupload -vc *.css frontend
+```
+
+Visual check with recursive search and custom tree depth:
+```bash
+gsupload -vc --max-depth 5 -r *.js backend
+```
+
+Show summary statistics only (no tree display):
+```bash
+gsupload -vc -ts *.html frontend
 ```
 
 Upload a specific directory (always recursive for directories):
