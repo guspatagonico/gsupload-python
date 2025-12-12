@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gsupload"
-version = "0.1.0"
+version = "0.2.0"
 description = "Sync/upload files and folders to FTP/SFTP hosts using host aliases"
 requires-python = ">=3.9"
 dependencies = [
@@ -15,8 +15,21 @@ dependencies = [
 [project.scripts]
 gsupload = "gsupload:main"
 
+[project.optional-dependencies]
+dev = [
+    "commitizen"
+]
+
 [tool.setuptools]
 py-modules = ["gsupload"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "$version"
+version_scheme = "pep440"
+version_provider = "uv"
+update_changelog_on_bump = true
+major_version_zero = true

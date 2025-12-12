@@ -19,3 +19,25 @@
 - `src/`: Source code
 - `tests/`: Test suite
 - `.github/workflows/`: CI/CD configurations
+
+## Commit Messages
+- **Convention**: Follow [Conventional Commits 1.0.0](https://www.conventionalcommits.org/)
+- **Format**: `<type>[optional scope]: <description>`
+- **Types**: 
+  - `feat`: New feature (MINOR bump)
+  - `fix`: Bug fix (PATCH bump)
+  - `docs`: Documentation changes
+  - `refactor`: Code refactoring
+  - `perf`: Performance improvements (PATCH bump)
+  - `test`: Test additions/changes
+  - `build`: Build system changes
+  - `ci`: CI/CD changes
+  - `chore`: Maintenance tasks
+- **Scopes**: `ftp`, `sftp`, `cli`, `config`, `visual-check`, `excludes`, `tree`
+- **Breaking Changes**: Add `!` after type/scope or use `BREAKING CHANGE:` in footer (MAJOR bump)
+- **Examples**:
+  - `feat(visual-check): add tree comparison before upload`
+  - `fix(sftp): handle connection timeout gracefully`
+  - `docs: update README with visual check examples`
+  - `feat!: change config file format to YAML`
+- When asked about commits, help format messages following this specification
