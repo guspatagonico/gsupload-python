@@ -4,10 +4,35 @@ A Python script to sync files and folders to a remote FTP/SFTP server based on a
 
 ## Installation
 
+### Option 1: Install as a global tool (recommended)
+
+Install `gsupload` globally using `uv` so it's available from anywhere in your PATH:
+
+```bash
+# Install the tool
+uv tool install --editable /path/to/gsupload-python
+
+# Update your shell configuration to add the tool directory to PATH
+uv tool update-shell
+
+# Restart your shell or source your profile, then use directly:
+gsupload --help
+```
+
+After installation, you can run `gsupload` from any directory without activating a virtual environment.
+
+### Option 2: Local development setup
+
+For development or if you prefer not to install globally:
+
 1.  Clone the repository.
 2.  Install dependencies:
     ```bash
-    pip install -r requirements.txt
+    uv pip install -r requirements.txt
+    ```
+3.  Run with:
+    ```bash
+    python src/gsupload.py [OPTIONS] PATTERNS... HOST_ALIAS
     ```
 
 ## Configuration
@@ -91,24 +116,43 @@ local_config.php
 ## Usage
 
 ```bash
-python src/gsupload.py {filename | directory_name | glob} {host alias}
+gsupload [OPTIONS] PATTERNS... HOST_ALIAS
 ```
+
+**Options:**
+- `-r, --recursive` - Search for files recursively in subdirectories when using glob patterns
+
+**Arguments:**
+- `PATTERNS` - One or more file patterns, filenames, or directories to upload
+- `HOST_ALIAS` - The host configuration name from hosts.json
 
 ### Examples
 
-Upload all CSS files to the `frontend` host:
+Upload all CSS files in the current directory only:
 ```bash
-python src/gsupload.py *.css frontend
+gsupload *.css frontend
 ```
 
-Upload a specific directory:
+Upload all CSS files recursively (including subdirectories):
 ```bash
-python src/gsupload.py src/assets frontend
+gsupload -r *.css frontend
+```
+
+Upload a specific directory (always recursive for directories):
+```bash
+gsupload src/assets frontend
 ```
 
 Upload multiple specific files:
 ```bash
-python src/gsupload.py index.html style.css frontend
+gsupload index.html style.css app.js frontend
 ```
+
+Upload with a specific pattern in a subdirectory:
+```bash
+gsupload src/**/*.js backend
+```
+
+**Note:** If you installed locally without `uv tool`, use `python src/gsupload.py` instead of `gsupload`.
 
 The script calculates the remote path relative to `local_basepath` defined in the configuration.

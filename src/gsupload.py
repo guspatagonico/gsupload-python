@@ -317,14 +317,30 @@ def walk_directory(
 
 
 def expand_files(
-    patterns: List[str], excludes: List[str], local_basepath: Path
+    patterns: List[str],
+    excludes: List[str],
+    local_basepath: Path,
+    recursive: bool = False,
 ) -> List[Path]:
     files = []
+    seen = set()
+
     for pattern in patterns:
-        # Check if it's a glob pattern or direct file
-        # If shell expanded it, it's a file path. If quoted, it's a glob pattern.
-        # We can just use glob.glob on it.
-        matched = glob.glob(pattern, recursive=True)
+        matched = []
+
+        # If recursive flag is set and pattern has no path separator, search recursively from cwd
+        if recursive and "/" not in pattern and "\\" not in pattern:
+            cwd = Path.cwd()
+            try:
+                # Use rglob for recursive matching
+                matched = [str(p) for p in cwd.rglob(pattern) if p.is_file()]
+            except Exception:
+                matched = []
+
+        if not matched:
+            # Fall back to standard glob
+            matched = glob.glob(pattern, recursive=True)
+
         if not matched:
             # Maybe it's a file that doesn't exist yet? Or just a typo.
             # Or maybe it's a directory.
@@ -335,38 +351,73 @@ def expand_files(
                 continue
 
         for m in matched:
-            path = Path(m)
+            path = Path(m).resolve()
+
+            # Skip if already processed (deduplication)
+            if path in seen:
+                continue
+
+            # Filter: only include files within local_basepath
+            try:
+                path.relative_to(local_basepath.resolve())
+            except ValueError:
+                # File is outside local_basepath, skip it
+                continue
+
             if is_excluded(path, excludes, local_basepath):
                 continue
 
             if path.is_file():
                 files.append(path)
+                seen.add(path)
             elif path.is_dir():
                 # Recursively add all files in directory
-                files.extend(walk_directory(path, excludes, local_basepath))
+                dir_files = walk_directory(path, excludes, local_basepath)
+                for f in dir_files:
+                    if f not in seen:
+                        files.append(f)
+                        seen.add(f)
+
     return files
 
 
 @click.command()
-@click.argument("args", nargs=-1, required=True)
-def main(args):
+@click.option(
+    "-r",
+    "--recursive",
+    is_flag=True,
+    help="Search for files recursively in subdirectories when using glob patterns without path separators (e.g., *.css)",
+)
+@click.argument("patterns", nargs=-1, required=True)
+@click.argument("host_alias")
+def main(recursive, patterns, host_alias):
     """
-    Upload files to a remote server based on configuration.
+    Upload files and directories to a remote FTP/SFTP server.
 
-    Usage: gsupload.py {filename | directory_name | glob} {host alias}
+    Uploads files matching PATTERNS to the remote server configured under HOST_ALIAS.
+    The remote path is calculated relative to the local_basepath and remote_basepath
+    defined in your hosts.json configuration file.
 
-    Example: gsupload.py *.css frontend
+    \b
+    PATTERNS can be:
+      - Specific filenames: index.html style.css
+      - Glob patterns: *.css *.js
+      - Directories: src/assets (uploads all files in directory)
+
+    \b
+    Examples:
+      gsupload *.css frontend              # Upload CSS files in current directory
+      gsupload -r *.css frontend           # Upload CSS files recursively in all subdirectories
+      gsupload src/assets frontend         # Upload all files in src/assets directory
+      gsupload index.html app.js backend   # Upload specific files to backend host
+
+    \b
+    Configuration:
+      The script looks for hosts.json in:
+        - ./hosts.json
+        - ~/.gsupload/hosts.json
+        - ~/.config/gsupload/hosts.json
     """
-    if len(args) < 2:
-        click.echo(
-            "Usage: gsupload.py {filename | directory_name | glob} {host alias}",
-            err=True,
-        )
-        sys.exit(1)
-
-    host_alias = args[-1]
-    patterns = args[:-1]
-
     config = load_config()
     host_config = get_host_config(config, host_alias)
 
@@ -381,7 +432,7 @@ def main(args):
     host_excludes = host_config.get("excludes", [])
     all_excludes = global_excludes + host_excludes
 
-    files_to_upload = expand_files(patterns, all_excludes, local_basepath)
+    files_to_upload = expand_files(patterns, all_excludes, local_basepath, recursive)
 
     if not files_to_upload:
         click.echo("No files found to upload.")
