@@ -211,7 +211,111 @@ The tool searches for and merges multiple configuration files to provide maximum
 
 ---
 
-#### Example 3: Multiple Bindings at Different Levels
+#### Example 3: Relative and Omitted `local_basepath`
+
+The `local_basepath` can be specified as:
+- **Absolute path**: `/full/path/to/directory`
+- **Relative path** (resolves relative to config file location): `.`, `./dist`, `../sibling`
+- **Omitted** (defaults to config file's directory)
+
+**File structure:**
+```
+/projects/webapp/.gsupload.json
+/projects/webapp/frontend/.gsupload.json
+/projects/webapp/admin/.gsupload.json
+```
+
+**Project root config** (`/projects/webapp/.gsupload.json`):
+```json
+{
+  "bindings": {
+    "main": {
+      "protocol": "sftp",
+      "hostname": "main.example.com",
+      "username": "user",
+      "password": "pass",
+      "local_basepath": ".",
+      "remote_basepath": "/var/www/main"
+    }
+  }
+}
+```
+
+**Frontend subdirectory** (`/projects/webapp/frontend/.gsupload.json`):
+```json
+{
+  "bindings": {
+    "frontend": {
+      "protocol": "sftp",
+      "hostname": "front.example.com",
+      "username": "frontuser",
+      "password": "frontpass",
+      "remote_basepath": "/var/www/frontend"
+    }
+  }
+}
+```
+*Note: `local_basepath` omitted - will default to `/projects/webapp/frontend`*
+
+**Admin subdirectory** (`/projects/webapp/admin/.gsupload.json`):
+```json
+{
+  "bindings": {
+    "admin": {
+      "protocol": "sftp",
+      "hostname": "admin.example.com",
+      "username": "adminuser",
+      "password": "adminpass",
+      "local_basepath": "../admin",
+      "remote_basepath": "/var/www/admin"
+    }
+  }
+}
+```
+*Note: `local_basepath` is relative, resolves to `/projects/webapp/admin`*
+
+**Resulting merged config when running from `/projects/webapp/admin/`:**
+```json
+{
+  "bindings": {
+    "main": {
+      "protocol": "sftp",
+      "hostname": "main.example.com",
+      "username": "user",
+      "password": "pass",
+      "local_basepath": "/projects/webapp",
+      "remote_basepath": "/var/www/main"
+    },
+    "frontend": {
+      "protocol": "sftp",
+      "hostname": "front.example.com",
+      "username": "frontuser",
+      "password": "frontpass",
+      "local_basepath": "/projects/webapp/frontend",
+      "remote_basepath": "/var/www/frontend"
+    },
+    "admin": {
+      "protocol": "sftp",
+      "hostname": "admin.example.com",
+      "username": "adminuser",
+      "password": "adminpass",
+      "local_basepath": "/projects/webapp/admin",
+      "remote_basepath": "/var/www/admin"
+    }
+  }
+}
+```
+
+**Key takeaways:**
+- ✅ `"."` in root config resolved to `/projects/webapp`
+- ✅ Omitted `local_basepath` in frontend config defaulted to `/projects/webapp/frontend`
+- ✅ `"../admin"` in admin config resolved to `/projects/webapp/admin`
+- ✅ All paths stored as absolute paths after resolution
+- ✅ Makes configs portable and easier to maintain
+
+---
+
+#### Example 4: Multiple Bindings at Different Levels
 
 **File structure:**
 ```
@@ -410,7 +514,13 @@ Each level can:
 }
 ```
 
-**Note:** `key_filename` is optional for SFTP if you use password authentication.
+**Notes:**
+- `key_filename` is optional for SFTP if you use password authentication
+- `local_basepath` can be:
+  - **Absolute path**: `/full/path/to/directory`
+  - **Relative path**: `.` (current config directory), `./dist`, `../sibling` (resolves relative to config file location)
+  - **Omitted**: Defaults to the directory containing the config file
+- Using `.` or omitting `local_basepath` makes configs portable and easier to maintain
 
 ### Excludes
 
@@ -463,13 +573,21 @@ local_config.php
 gsupload [OPTIONS] PATTERNS...
 ```
 
+**Default Behavior:**
+By default, `gsupload` operates in **recursive mode with complete visual check** (`-r -vcc`). This means:
+- ✅ Glob patterns like `"*.css"` search recursively through all subdirectories
+- ✅ Shows complete tree comparison (local + remote files) before upload
+- ✅ Requires confirmation before proceeding
+
+To disable these defaults, use `-nr` (no recursive) or `-nvcc` (no visual check complete).
+
 **Options:**
-- `-r, --recursive` - Search for files recursively in subdirectories when using glob patterns
-- `-vc, --visual-check` - Display tree comparison of local vs remote files before uploading
-- `-vcc, --visual-check-complete` - Display complete tree comparison including remote-only files
+- `-r, --recursive` / `-nr, --no-recursive` - Search recursively in subdirectories **[default: enabled]**
+- `-vc, --visual-check` - Display tree comparison (changes only) before uploading
+- `-vcc, --visual-check-complete` / `-nvcc, --no-visual-check-complete` - Display complete tree comparison including remote-only files **[default: enabled]**
 - `--max-depth` - Maximum tree depth to display in visual check (default: 20)
 - `-ts, --tree-summary` - Show summary statistics only, skip tree display in visual check
-- `-f, --force` - Force upload without confirmation or remote file check (fastest mode)
+- `-f, --force` - Force upload without confirmation or remote file check (fastest mode, disables visual check)
 - `-b, --binding` - Binding alias from configuration. If omitted, auto-detects from current directory
 
 **Arguments:**
@@ -494,36 +612,31 @@ gsupload -r src/**/*.js # May fail or behave unexpectedly
 
 ### Examples
 
-Upload all CSS files in the current directory (auto-detect binding):
+**Basic usage (uses defaults: recursive + complete visual check):**
 ```bash
-gsupload "*.css"
+gsupload "*.css"                      # Recursively finds all CSS, shows complete tree, asks confirmation
+gsupload -b=frontend "*.js"           # Same with explicit binding
 ```
 
-Upload all CSS files using a specific binding:
+**Upload without visual check (fast mode):**
 ```bash
-gsupload -b=frontend "*.css"
-# or
-gsupload --binding=frontend "*.css"
+gsupload -f -b=frontend "*.css"       # Force mode: no confirmation, no remote check
+gsupload -nvcc -b=frontend "*.css"    # Disable visual check but still upload
 ```
 
-Auto-detect binding from current directory:
+**Non-recursive upload (current directory only):**
 ```bash
-gsupload "*.css"
+gsupload -nr -b=frontend "*.css"      # Only files in current directory
 ```
 
-Upload all CSS files recursively (including subdirectories):
+**Visual check with changes only:**
 ```bash
-gsupload -r -b=frontend "*.css"
+gsupload -vc -b=frontend "*.css"      # Shows only files that will change (not remote-only)
 ```
 
-Preview changes before uploading with visual tree comparison:
+**Custom tree depth:**
 ```bash
-gsupload -vc -b=frontend "*.css"
-```
-
-Visual check with recursive search and custom tree depth:
-```bash
-gsupload -vc --max-depth=5 -r -b=backend "*.js"
+gsupload --max-depth=5 -b=backend "*.js"  # Limit tree display depth
 ```
 
 Show summary statistics only (no tree display):
@@ -531,19 +644,19 @@ Show summary statistics only (no tree display):
 gsupload -vc -ts -b=frontend "*.html"
 ```
 
-Upload a specific directory (always recursive for directories):
+**Upload directories:**
 ```bash
-gsupload -b=frontend src/assets
+gsupload -b=frontend src/assets           # Uploads all files in directory (recursive by default)
 ```
 
-Upload multiple specific files:
+**Upload multiple specific files:**
 ```bash
 gsupload -b=frontend index.html style.css app.js
 ```
 
-Upload with a specific pattern in a subdirectory:
+**Complex patterns:**
 ```bash
-gsupload -b=backend "src/**/*.js"
+gsupload -b=backend "src/**/*.js"         # All JS files in src and subdirectories
 ```
 
 **Note:** If you installed locally without `uv tool`, use `python src/gsupload.py` instead of `gsupload`.

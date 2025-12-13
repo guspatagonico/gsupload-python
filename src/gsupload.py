@@ -97,12 +97,34 @@ def load_config() -> Dict[str, Any]:
                 merged_config["bindings"] = {}
 
             for binding_name, binding_config in config["bindings"].items():
+                # Resolve local_basepath relative to config file location
+                if "local_basepath" in binding_config:
+                    local_basepath_str = binding_config["local_basepath"]
+                    # Expand ~ and resolve relative paths
+                    local_basepath_path = Path(local_basepath_str).expanduser()
+
+                    # If relative path, resolve relative to config file's directory
+                    if not local_basepath_path.is_absolute():
+                        local_basepath_path = (
+                            config_path.parent / local_basepath_path
+                        ).resolve()
+                    else:
+                        local_basepath_path = local_basepath_path.resolve()
+
+                    # Update the binding config with resolved absolute path
+                    binding_config = binding_config.copy()
+                    binding_config["local_basepath"] = str(local_basepath_path)
+                elif binding_name not in merged_config["bindings"]:
+                    # No local_basepath specified - default to config file's directory
+                    binding_config = binding_config.copy()
+                    binding_config["local_basepath"] = str(config_path.parent.resolve())
+
                 if binding_name in merged_config["bindings"]:
                     # Merge/override this binding
                     merged_config["bindings"][binding_name].update(binding_config)
                 else:
                     # New binding
-                    merged_config["bindings"][binding_name] = binding_config.copy()
+                    merged_config["bindings"][binding_name] = binding_config
 
         # Other top-level keys: simple override
         for key in config:
@@ -928,10 +950,10 @@ def expand_files(
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option(
-    "-r",
-    "--recursive",
-    is_flag=True,
-    help="Search for files recursively in subdirectories when using glob patterns without path separators (e.g., *.css)",
+    "-r/-nr",
+    "--recursive/--no-recursive",
+    default=True,
+    help="Search for files recursively in subdirectories when using glob patterns [default: enabled]",
 )
 @click.option(
     "-vc",
@@ -940,10 +962,10 @@ def expand_files(
     help="Display tree comparison of local vs remote files before uploading (shows changes only)",
 )
 @click.option(
-    "-vcc",
-    "--visual-check-complete",
-    is_flag=True,
-    help="Display complete tree comparison including remote-only files",
+    "-vcc/-nvcc",
+    "--visual-check-complete/--no-visual-check-complete",
+    default=True,
+    help="Display complete tree comparison including remote-only files [default: enabled]",
 )
 @click.option(
     "--max-depth",
