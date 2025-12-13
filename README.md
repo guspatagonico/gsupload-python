@@ -209,6 +209,61 @@ The tool searches for and merges multiple configuration files to provide maximum
 - ✅ `hostname`, `username`, `password`, `remote_basepath` overridden by subdirectory config
 - ✅ `local_basepath` inherited from parent (not overridden)
 
+### Inspecting Merged Configuration
+
+Use the `--show-config` flag to see the final merged configuration with source annotations:
+
+```bash
+gsupload --show-config
+```
+
+**Output example:**
+```
+📋 Configuration Files (merge order):
+  1. /Users/user/.gsupload/gsupload.json
+  2. /projects/myapp/.gsupload.json
+  3. /projects/myapp/dist_production/.gsupload.json
+
+🔀 Merged Configuration:
+{
+  "global_excludes": ["*.log", ".git", "*.map"],
+  "bindings": {
+    "frontend": {
+      "protocol": "sftp",
+      "hostname": "prod.example.com",
+      "port": 22,
+      "username": "produser",
+      "password": "prodpass",
+      "local_basepath": "/projects/myapp/frontend",
+      "remote_basepath": "/var/www/production"
+    }
+  }
+}
+
+📍 Source Annotations:
+
+  global_excludes:
+    • *.log
+      ↳ from: /projects/myapp/.gsupload.json
+    • .git
+      ↳ from: /projects/myapp/.gsupload.json
+    • *.map
+      ↳ from: /projects/myapp/dist_production/.gsupload.json
+
+  bindings:
+    • frontend
+      ↳ defined in: /projects/myapp/.gsupload.json, /projects/myapp/dist_production/.gsupload.json
+        - protocol: from /projects/myapp/.gsupload.json
+        - hostname: from /projects/myapp/dist_production/.gsupload.json
+        - port: from /projects/myapp/.gsupload.json
+        - username: from /projects/myapp/dist_production/.gsupload.json
+        - password: from /projects/myapp/dist_production/.gsupload.json
+        - local_basepath: from /projects/myapp/.gsupload.json
+        - remote_basepath: from /projects/myapp/dist_production/.gsupload.json
+```
+
+This helps debug complex multi-layered configurations by showing exactly which file contributes each setting.
+
 ---
 
 #### Example 3: Relative and Omitted `local_basepath`
@@ -567,6 +622,48 @@ You can exclude files from being uploaded in three ways:
 local_config.php
 ```
 
+#### Debugging Excludes
+
+Use `--show-ignored` to see which files and directories are being excluded:
+
+```bash
+# Show all ignored items (recursive, auto-detect binding)
+gsupload --show-ignored
+
+# Show ignored items in current directory only
+gsupload --show-ignored -nr
+
+# Show ignored items for specific binding
+gsupload --show-ignored -b=frontend
+```
+
+**Example output:**
+```
+🚫 Ignored Files and Directories:
+Scanning from: /projects/webapp
+Mode: Recursive
+
+Active exclude patterns:
+  • .DS_Store
+  • node_modules
+  • *.log
+  • .git
+  • *.map
+
+Found 6 ignored items:
+
+📄 .DS_Store
+📁 .git
+📄 .gsupload.json
+  📄 dist/bundle.map
+📁 node_modules
+📄 test.log
+
+Total items scanned: 14
+```
+
+This helps verify your exclude patterns are working as expected.
+
 ## Usage
 
 ```bash
@@ -581,14 +678,23 @@ By default, `gsupload` operates in **recursive mode with complete visual check**
 
 To disable these defaults, use `-nr` (no recursive) or `-nvcc` (no visual check complete).
 
+**Visual Check Modes:**
+- **Default** (or `-vcc`): Shows complete tree including remote-only files (files that exist on server but not locally)
+- **Changes only** (`-vc`): Shows only files that will be uploaded (new or overwritten), excludes remote-only files
+- **No visual check** (`-nvcc` or `-f`): Skips tree comparison entirely
+
+All visual check modes only scan files within the `remote_basepath` directory, never the entire server filesystem.
+
 **Options:**
 - `-r, --recursive` / `-nr, --no-recursive` - Search recursively in subdirectories **[default: enabled]**
-- `-vc, --visual-check` - Display tree comparison (changes only) before uploading
+- `-vc, --visual-check` - Display tree comparison showing only changes (new/overwritten files, excludes remote-only)
 - `-vcc, --visual-check-complete` / `-nvcc, --no-visual-check-complete` - Display complete tree comparison including remote-only files **[default: enabled]**
 - `--max-depth` - Maximum tree depth to display in visual check (default: 20)
 - `-ts, --tree-summary` - Show summary statistics only, skip tree display in visual check
 - `-f, --force` - Force upload without confirmation or remote file check (fastest mode, disables visual check)
 - `-b, --binding` - Binding alias from configuration. If omitted, auto-detects from current directory
+- `--show-config` - Display the merged configuration with source file annotations and exit
+- `--show-ignored` - List all files and directories that are being ignored by exclude patterns and exit
 
 **Arguments:**
 - `PATTERNS` - One or more file patterns, filenames, or directories to upload
@@ -612,10 +718,28 @@ gsupload -r src/**/*.js # May fail or behave unexpectedly
 
 ### Examples
 
+**Inspect configuration:**
+```bash
+gsupload --show-config                    # Display merged config with source annotations
+```
+
+**List ignored files:**
+```bash
+gsupload --show-ignored                   # List all ignored files/dirs (recursive, auto-detect binding)
+gsupload --show-ignored -nr               # List ignored items in current directory only
+gsupload --show-ignored -b=frontend       # List ignored items for specific binding
+```
+
 **Basic usage (uses defaults: recursive + complete visual check):**
 ```bash
 gsupload "*.css"                      # Recursively finds all CSS, shows complete tree, asks confirmation
 gsupload -b=frontend "*.js"           # Same with explicit binding
+```
+
+**Visual check with changes only (excludes remote-only files):**
+```bash
+gsupload -vc "*.css"                  # Shows only files that will be uploaded (new/overwrite)
+gsupload -vc -b=frontend "*.js"       # Faster check, skips listing remote-only files
 ```
 
 **Upload without visual check (fast mode):**

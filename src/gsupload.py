@@ -13,24 +13,20 @@ from typing import List, Dict, Any, Set, Tuple, Optional
 DEFAULT_MAX_DEPTH = 20
 
 
-def load_config() -> Dict[str, Any]:
+def load_config_with_sources() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    Load and merge configuration files with inheritance.
-
-    Search order and merging:
-    1. Load global config from ~/.gsupload/gsupload.json or ~/.config/gsupload/gsupload.json (base)
-    2. Walk up from cwd collecting all .gsupload.json files
-    3. Merge configs from root to current directory (deeper configs override)
-
-    Merging rules:
-    - global_excludes: Additive (all patterns from all configs are combined)
-    - bindings: Deeper configs can override or add new bindings (deep merge per binding)
-    - Other top-level keys: Deeper configs override
+    Load and merge configuration files with source tracking.
 
     Returns:
-        Dictionary containing merged host configurations
+        Tuple of (merged_config, source_map) where source_map tracks which file
+        contributed each piece of configuration
     """
     configs_to_merge = []
+    source_map = {
+        "global_excludes": {},
+        "bindings": {},
+        "config_files": [],
+    }
 
     # First, try to load global config as base
     global_locations = [
@@ -43,6 +39,7 @@ def load_config() -> Dict[str, Any]:
             try:
                 with open(loc, "r") as f:
                     configs_to_merge.append((loc, json.load(f)))
+                    source_map["config_files"].append(str(loc))
                     break
             except json.JSONDecodeError as e:
                 click.echo(f"Warning: Failed to parse '{loc}': {e}", err=True)
@@ -71,6 +68,7 @@ def load_config() -> Dict[str, Any]:
         try:
             with open(config_path, "r") as f:
                 configs_to_merge.append((config_path, json.load(f)))
+                source_map["config_files"].append(str(config_path))
         except json.JSONDecodeError as e:
             click.echo(f"Warning: Failed to parse '{config_path}': {e}", err=True)
 
@@ -82,28 +80,43 @@ def load_config() -> Dict[str, Any]:
         )
         sys.exit(1)
 
-    # Merge all configs
+    # Merge all configs with source tracking
     merged_config = {}
     all_global_excludes = []
 
     for config_path, config in configs_to_merge:
-        # Collect global_excludes additively
+        config_path_str = str(config_path)
+
+        # Track global_excludes with source
         if "global_excludes" in config:
+            for pattern in config["global_excludes"]:
+                if pattern not in source_map["global_excludes"]:
+                    source_map["global_excludes"][pattern] = []
+                source_map["global_excludes"][pattern].append(config_path_str)
             all_global_excludes.extend(config["global_excludes"])
 
-        # Merge bindings (deep merge - each binding can be overridden independently)
+        # Merge bindings with source tracking
         if "bindings" in config:
             if "bindings" not in merged_config:
                 merged_config["bindings"] = {}
 
             for binding_name, binding_config in config["bindings"].items():
+                # Track binding source
+                if binding_name not in source_map["bindings"]:
+                    source_map["bindings"][binding_name] = {
+                        "defined_in": [],
+                        "properties": {},
+                    }
+
+                source_map["bindings"][binding_name]["defined_in"].append(
+                    config_path_str
+                )
+
                 # Resolve local_basepath relative to config file location
                 if "local_basepath" in binding_config:
                     local_basepath_str = binding_config["local_basepath"]
-                    # Expand ~ and resolve relative paths
                     local_basepath_path = Path(local_basepath_str).expanduser()
 
-                    # If relative path, resolve relative to config file's directory
                     if not local_basepath_path.is_absolute():
                         local_basepath_path = (
                             config_path.parent / local_basepath_path
@@ -111,19 +124,28 @@ def load_config() -> Dict[str, Any]:
                     else:
                         local_basepath_path = local_basepath_path.resolve()
 
-                    # Update the binding config with resolved absolute path
                     binding_config = binding_config.copy()
                     binding_config["local_basepath"] = str(local_basepath_path)
                 elif binding_name not in merged_config["bindings"]:
-                    # No local_basepath specified - default to config file's directory
                     binding_config = binding_config.copy()
                     binding_config["local_basepath"] = str(config_path.parent.resolve())
 
+                # Track each property's source
+                for prop_key, prop_value in binding_config.items():
+                    if (
+                        prop_key
+                        not in source_map["bindings"][binding_name]["properties"]
+                    ):
+                        source_map["bindings"][binding_name]["properties"][
+                            prop_key
+                        ] = []
+                    source_map["bindings"][binding_name]["properties"][prop_key].append(
+                        config_path_str
+                    )
+
                 if binding_name in merged_config["bindings"]:
-                    # Merge/override this binding
                     merged_config["bindings"][binding_name].update(binding_config)
                 else:
-                    # New binding
                     merged_config["bindings"][binding_name] = binding_config
 
         # Other top-level keys: simple override
@@ -135,6 +157,27 @@ def load_config() -> Dict[str, Any]:
     if all_global_excludes:
         merged_config["global_excludes"] = all_global_excludes
 
+    return merged_config, source_map
+
+
+def load_config() -> Dict[str, Any]:
+    """
+    Load and merge configuration files with inheritance.
+
+    Search order and merging:
+    1. Load global config from ~/.gsupload/gsupload.json or ~/.config/gsupload/gsupload.json (base)
+    2. Walk up from cwd collecting all .gsupload.json files
+    3. Merge configs from root to current directory (deeper configs override)
+
+    Merging rules:
+    - global_excludes: Additive (all patterns from all configs are combined)
+    - bindings: Deeper configs can override or add new bindings (deep merge per binding)
+    - Other top-level keys: Deeper configs override
+
+    Returns:
+        Dictionary containing merged host configurations
+    """
+    merged_config, _ = load_config_with_sources()
     return merged_config
 
 
@@ -144,6 +187,136 @@ def get_host_config(config: Dict[str, Any], alias: str) -> Dict[str, Any]:
         click.echo(f"Error: Host alias '{alias}' not found in configuration.", err=True)
         sys.exit(1)
     return bindings[alias]
+
+
+def display_config(merged_config: Dict[str, Any], source_map: Dict[str, Any]) -> None:
+    """
+    Display merged configuration with source annotations.
+
+    Shows:
+    1. List of config files in merge order
+    2. Merged configuration as colored JSON
+    3. Source annotations for each item
+
+    Args:
+        merged_config: The final merged configuration
+        source_map: Dictionary tracking sources for each config item
+    """
+    # Display config files in merge order
+    click.echo(
+        click.style("\n📋 Configuration Files (merge order):", fg="cyan", bold=True)
+    )
+    for i, config_file in enumerate(source_map["config_files"], 1):
+        click.echo(f"  {i}. {config_file}")
+
+    # Display merged configuration with colors
+    click.echo(click.style("\n🔀 Merged Configuration:", fg="cyan", bold=True))
+    formatted_json = json.dumps(merged_config, indent=2)
+    click.echo(click.style(formatted_json, fg="green"))
+
+    # Display source annotations
+    click.echo(click.style("\n📍 Source Annotations:", fg="cyan", bold=True))
+
+    # Global excludes
+    if source_map.get("global_excludes"):
+        click.echo(click.style("\n  global_excludes:", fg="yellow", bold=True))
+        for pattern, sources in source_map["global_excludes"].items():
+            sources_str = ", ".join(str(s) for s in sources)
+            click.echo(f"    • {click.style(pattern, fg='white')}")
+            click.echo(f"      ↳ from: {click.style(sources_str, fg='blue', dim=True)}")
+
+    # Bindings
+    if source_map.get("bindings"):
+        click.echo(click.style("\n  bindings:", fg="yellow", bold=True))
+        for binding_name, binding_info in source_map["bindings"].items():
+            click.echo(f"    • {click.style(binding_name, fg='white', bold=True)}")
+
+            # Show where binding was defined
+            defined_in_str = ", ".join(str(s) for s in binding_info["defined_in"])
+            click.echo(
+                f"      ↳ defined in: {click.style(defined_in_str, fg='blue', dim=True)}"
+            )
+
+            # Show source for each property
+            if binding_info.get("properties"):
+                for prop, sources in binding_info["properties"].items():
+                    sources_str = ", ".join(str(s) for s in sources)
+                    click.echo(
+                        f"        - {click.style(prop, fg='magenta')}: from {click.style(sources_str, fg='blue', dim=True)}"
+                    )
+
+
+def list_ignored_files(
+    local_basepath: Path, excludes: List[str], recursive: bool = True
+) -> None:
+    """
+    List all files and directories that are being ignored by exclude patterns.
+
+    Args:
+        local_basepath: Base directory to scan from
+        excludes: List of exclude patterns to apply
+        recursive: If True, scan subdirectories recursively
+    """
+    click.echo(click.style("\n🚫 Ignored Files and Directories:", fg="cyan", bold=True))
+    click.echo(f"Scanning from: {local_basepath}")
+    click.echo(f"Mode: {'Recursive' if recursive else 'Current directory only'}\n")
+
+    if not excludes:
+        click.echo(click.style("No exclude patterns configured.", dim=True))
+        return
+
+    # Display active exclude patterns
+    click.echo(click.style("Active exclude patterns:", fg="yellow"))
+    for pattern in excludes:
+        click.echo(f"  • {click.style(pattern, fg='white')}")
+    click.echo()
+
+    ignored_items = []
+    scanned_count = 0
+
+    def scan_directory(directory: Path, depth: int = 0):
+        nonlocal scanned_count
+
+        try:
+            entries = sorted(directory.iterdir())
+        except (OSError, PermissionError):
+            return
+
+        for entry in entries:
+            scanned_count += 1
+
+            # Check if this item is excluded
+            if is_excluded(entry, excludes, local_basepath):
+                try:
+                    rel_path = entry.relative_to(local_basepath)
+                    item_type = "📁" if entry.is_dir() else "📄"
+                    ignored_items.append((str(rel_path), item_type, depth))
+                except ValueError:
+                    pass
+                continue  # Don't descend into excluded directories
+
+            # If not excluded and it's a directory, scan it recursively
+            if recursive and entry.is_dir():
+                scan_directory(entry, depth + 1)
+
+    scan_directory(local_basepath)
+
+    # Display ignored items
+    if ignored_items:
+        click.echo(
+            click.style(
+                f"Found {len(ignored_items)} ignored items:", fg="red", bold=True
+            )
+        )
+        click.echo()
+
+        for rel_path, item_type, depth in ignored_items:
+            indent = "  " * depth
+            click.echo(f"{indent}{item_type} {click.style(rel_path, fg='bright_red')}")
+    else:
+        click.echo(click.style("No ignored files or directories found.", fg="green"))
+
+    click.echo(f"\n{click.style('Total items scanned:', fg='cyan')} {scanned_count}")
 
 
 def auto_detect_binding(config: Dict[str, Any]) -> Optional[str]:
@@ -959,7 +1132,7 @@ def expand_files(
     "-vc",
     "--visual-check",
     is_flag=True,
-    help="Display tree comparison of local vs remote files before uploading (shows changes only)",
+    help="Display tree comparison showing only changes (new/overwritten files, excludes remote-only)",
 )
 @click.option(
     "-vcc/-nvcc",
@@ -992,7 +1165,17 @@ def expand_files(
     default=None,
     help="Binding alias from configuration. If omitted, auto-detects from current directory.",
 )
-@click.argument("patterns", nargs=-1, required=True)
+@click.option(
+    "--show-config",
+    is_flag=True,
+    help="Display the merged configuration with source file annotations and exit.",
+)
+@click.option(
+    "--show-ignored",
+    is_flag=True,
+    help="List all files and directories that are being ignored by exclude patterns and exit.",
+)
+@click.argument("patterns", nargs=-1, required=False)
 def main(
     recursive,
     visual_check,
@@ -1001,6 +1184,8 @@ def main(
     tree_summary,
     force,
     binding_alias,
+    show_config,
+    show_ignored,
     patterns,
 ):
     """
@@ -1042,7 +1227,49 @@ def main(
     """
     click.echo()
 
+    # Handle --show-config flag
+    if show_config:
+        merged_config, source_map = load_config_with_sources()
+        display_config(merged_config, source_map)
+        sys.exit(0)
+
     config = load_config()
+
+    # Handle --show-ignored flag
+    if show_ignored:
+        # Auto-detect or use provided binding
+        if binding_alias is None:
+            binding_alias = auto_detect_binding(config)
+            if binding_alias is None:
+                click.echo(
+                    "Error: Could not auto-detect binding. Please specify binding with -b or --binding.",
+                    err=True,
+                )
+                click.echo("\nAvailable bindings:", err=True)
+                bindings = config.get("bindings", {})
+                for alias, binding_config in bindings.items():
+                    click.echo(
+                        f"  - {alias}: {binding_config.get('local_basepath')}",
+                        err=True,
+                    )
+                sys.exit(1)
+            click.echo(f"🔍 Auto-detected binding: {binding_alias}")
+
+        host_config = get_host_config(config, binding_alias)
+        local_basepath = Path(host_config["local_basepath"])
+
+        if not local_basepath.exists():
+            click.echo(
+                f"Error: Local basepath '{local_basepath}' does not exist.", err=True
+            )
+            sys.exit(1)
+
+        global_excludes = config.get("global_excludes", [])
+        host_excludes = host_config.get("excludes", [])
+        all_excludes = global_excludes + host_excludes
+
+        list_ignored_files(local_basepath, all_excludes, recursive)
+        sys.exit(0)
 
     # Auto-detect binding if not provided
     if binding_alias is None:
@@ -1063,6 +1290,18 @@ def main(
                 )
             sys.exit(1)
         click.echo(f"🔍 Auto-detected binding: {binding_alias}")
+
+    # Require patterns for upload operation
+    if not patterns:
+        click.echo(
+            "Error: No file patterns specified. Please provide file patterns to upload.",
+            err=True,
+        )
+        click.echo("Examples:", err=True)
+        click.echo("  gsupload '*.css'", err=True)
+        click.echo("  gsupload 'src/**/*.js'", err=True)
+        click.echo("  gsupload index.html style.css", err=True)
+        sys.exit(1)
 
     host_config = get_host_config(config, binding_alias)
 
@@ -1097,7 +1336,13 @@ def main(
     protocol = host_config.get("protocol", "ftp").lower()
 
     # Visual check before upload (skip if force mode enabled)
+    # -vc explicitly sets complete_tree=False (changes only)
+    # -vcc sets complete_tree=True (includes remote-only files)
+    # Default is -vcc behavior
     if not force and (visual_check or visual_check_complete):
+        # If -vc is explicitly set, show changes only (disable complete tree)
+        show_complete_tree = visual_check_complete and not visual_check
+
         new_count, overwrite_count, remote_only_count = display_visual_comparison(
             host_config,
             files_to_upload,
@@ -1106,7 +1351,7 @@ def main(
             binding_alias,
             max_depth,
             tree_summary,
-            complete_tree=visual_check_complete,
+            complete_tree=show_complete_tree,
         )
 
         if not click.confirm("\n⚠️  Proceed with upload?", default=False):
