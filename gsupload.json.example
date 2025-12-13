@@ -1,0 +1,32 @@
+{
+    "global_excludes": [
+        ".DS_Store",
+        "*.log",
+        "__pycache__",
+        ".git"
+    ],
+    "bindings": {
+        "frontend": {
+            "protocol": "sftp",
+            "hostname": "example.com",
+            "port": 22,
+            "username": "user",
+            "password": "password",
+            "local_basepath": "/Users/gustavo/dev/project",
+            "remote_basepath": "/var/www/html",
+            "excludes": [
+                "node_modules",
+                "*.tmp"
+            ]
+        },
+        "admin": {
+            "protocol": "ftp",
+            "hostname": "ftp.example.com",
+            "port": 21,
+            "username": "admin",
+            "password": "secretpassword",
+            "local_basepath": "/Users/gustavo/dev/project/admin",
+            "remote_basepath": "/public_html/admin"
+        }
+    }
+}

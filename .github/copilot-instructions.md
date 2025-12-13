@@ -11,9 +11,10 @@
 - **Docstrings**: Use Google style docstrings.
 
 ## Development Workflow
-- **Dependency Management**: pip
+- **Dependency Management**: uv (use `uv pip install` for packages, `uv run python` for scripts)
 - **Testing**: pytest
 - **Linting**: ruff
+- **Important**: Always use `uv` commands instead of `pip3` or `python3` directly
 
 ## Key Files & Directories
 - `src/`: Source code

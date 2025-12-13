@@ -8,26 +8,60 @@ import click
 import paramiko
 import fnmatch
 from pathlib import Path
-from typing import List, Dict, Any, Set, Tuple
-from collections import defaultdict
+from typing import List, Dict, Any, Set, Tuple, Optional
 
-CONFIG_LOCATIONS = [
-    Path("hosts.json"),
-    Path.home() / ".gsupload" / "hosts.json",
-    Path.home() / ".config" / "gsupload" / "hosts.json",
-]
+DEFAULT_MAX_DEPTH = 20
 
 
 def load_config() -> Dict[str, Any]:
+    """
+    Load configuration file.
+
+    Search order:
+    1. Current directory and parent directories - looks for .gsupload.json (dotfile)
+    2. ~/.gsupload/gsupload.json
+    3. ~/.config/gsupload/gsupload.json
+
+    Returns:
+        Dictionary containing host configurations
+    """
     config_file = None
-    for loc in CONFIG_LOCATIONS:
-        if loc.exists():
-            config_file = loc
+
+    # First, try to find .gsupload.json in current directory or parent directories
+    current_dir = Path.cwd()
+    searched_paths = []
+
+    while True:
+        candidate = current_dir / ".gsupload.json"
+        searched_paths.append(candidate)
+
+        if candidate.exists():
+            config_file = candidate
             break
+
+        # Move to parent directory
+        parent = current_dir.parent
+        if parent == current_dir:
+            # Reached filesystem root
+            break
+        current_dir = parent
+
+    # If not found, check global config locations
+    if not config_file:
+        global_locations = [
+            Path.home() / ".gsupload" / "gsupload.json",
+            Path.home() / ".config" / "gsupload" / "gsupload.json",
+        ]
+
+        for loc in global_locations:
+            searched_paths.append(loc)
+            if loc.exists():
+                config_file = loc
+                break
 
     if not config_file:
         click.echo(
-            f"Error: Configuration file not found. Checked: {', '.join(str(p) for p in CONFIG_LOCATIONS)}",
+            f"Error: Configuration file not found. Checked: {', '.join(str(p) for p in searched_paths)}",
             err=True,
         )
         sys.exit(1)
@@ -41,10 +75,50 @@ def load_config() -> Dict[str, Any]:
 
 
 def get_host_config(config: Dict[str, Any], alias: str) -> Dict[str, Any]:
-    if alias not in config:
+    bindings = config.get("bindings", {})
+    if alias not in bindings:
         click.echo(f"Error: Host alias '{alias}' not found in configuration.", err=True)
         sys.exit(1)
-    return config[alias]
+    return bindings[alias]
+
+
+def auto_detect_binding(config: Dict[str, Any]) -> Optional[str]:
+    """
+    Auto-detect binding by comparing current working directory with local_basepath.
+
+    Returns the binding alias if found, None otherwise.
+    Prioritizes the most specific match (deepest path).
+    """
+    bindings = config.get("bindings", {})
+    if not bindings:
+        return None
+
+    cwd = Path.cwd().resolve()
+
+    # Find all bindings where cwd is within or equals local_basepath
+    matches = []
+    for alias, binding_config in bindings.items():
+        local_basepath_str = binding_config.get("local_basepath", "")
+        if not local_basepath_str:
+            continue
+
+        # Expand ~ and resolve to absolute path
+        local_basepath = Path(local_basepath_str).expanduser().resolve()
+
+        try:
+            # Check if cwd is within this binding's basepath
+            cwd.relative_to(local_basepath)
+            matches.append((alias, local_basepath))
+        except ValueError:
+            # cwd is not within this basepath
+            continue
+
+    if not matches:
+        return None
+
+    # Return the most specific match (longest/deepest path)
+    matches.sort(key=lambda x: len(str(x[1])), reverse=True)
+    return matches[0][0]
 
 
 def calculate_remote_path(
@@ -66,7 +140,7 @@ def calculate_remote_path(
 
 
 def list_remote_ftp(
-    ftp: ftplib.FTP, remote_basepath: str, timeout: int = 60
+    ftp: ftplib.FTP, remote_basepath: str, timeout: int = 60, progress_bar=None
 ) -> Set[str]:
     """
     Recursively list all files on FTP server starting from remote_basepath.
@@ -75,6 +149,7 @@ def list_remote_ftp(
         ftp: Active FTP connection
         remote_basepath: Remote root directory to start listing from
         timeout: Socket timeout in seconds (default: 60)
+        progress_bar: Optional click progressbar to update as files are found
 
     Returns:
         Set of relative file paths from remote_basepath
@@ -141,7 +216,10 @@ def list_remote_ftp(
 
 
 def list_remote_sftp(
-    sftp: paramiko.SFTPClient, remote_basepath: str, timeout: int = 60
+    sftp: paramiko.SFTPClient,
+    remote_basepath: str,
+    timeout: int = 60,
+    progress_bar=None,
 ) -> Set[str]:
     """
     Recursively list all files on SFTP server starting from remote_basepath.
@@ -150,6 +228,7 @@ def list_remote_sftp(
         sftp: Active SFTP connection
         remote_basepath: Remote root directory to start listing from
         timeout: Keepalive interval in seconds (default: 60)
+        progress_bar: Optional click progressbar to update as files are found
 
     Returns:
         Set of relative file paths from remote_basepath
@@ -208,14 +287,30 @@ def upload_ftp(host_config: Dict[str, Any], files: List[Path], local_basepath: P
     password = host_config["password"]
     remote_basepath = host_config["remote_basepath"]
 
+    # Sort files by depth (external first) then alphabetically
+    def sort_key(f: Path):
+        try:
+            rel_path = f.relative_to(local_basepath)
+            depth = len(rel_path.parts) - 1
+            return (depth, str(rel_path).lower())
+        except ValueError:
+            return (999, str(f).lower())
+
+    sorted_files = sorted(files, key=sort_key)
+
     try:
         ftp = ftplib.FTP()
         ftp.connect(hostname, port)
         ftp.login(username, password)
 
-        for local_file in files:
+        click.echo("Uploading:")
+
+        total_files = len(sorted_files)
+        for idx, local_file in enumerate(sorted_files, start=1):
             if local_file.is_dir():
                 continue  # Directories are handled by walking or creating, but here we expect a list of files
+
+            click.echo(f"[{idx}/{total_files}]", nl=False)
 
             remote_path = calculate_remote_path(
                 local_file, local_basepath, remote_basepath
@@ -239,10 +334,10 @@ def upload_ftp(host_config: Dict[str, Any], files: List[Path], local_basepath: P
 
             try:
                 with open(local_file, "rb") as f:
-                    click.echo(f"Uploading {local_file} to {remote_path}...")
                     ftp.storbinary(f"STOR {remote_path}", f)
+                click.echo(f" ✅ {local_file} → {remote_path}")
             except Exception as e:
-                click.echo(f"Failed to upload {local_file}: {e}", err=True)
+                click.echo(f" ❌ {local_file} → {remote_path} ({e})", err=True)
 
         ftp.quit()
     except Exception as e:
@@ -258,6 +353,17 @@ def upload_sftp(host_config: Dict[str, Any], files: List[Path], local_basepath: 
     key_filename = host_config.get("key_filename")
     remote_basepath = host_config["remote_basepath"]
 
+    # Sort files by depth (external first) then alphabetically
+    def sort_key(f: Path):
+        try:
+            rel_path = f.relative_to(local_basepath)
+            depth = len(rel_path.parts) - 1
+            return (depth, str(rel_path).lower())
+        except ValueError:
+            return (999, str(f).lower())
+
+    sorted_files = sorted(files, key=sort_key)
+
     try:
         transport = paramiko.Transport((hostname, port))
         if key_filename:
@@ -270,9 +376,14 @@ def upload_sftp(host_config: Dict[str, Any], files: List[Path], local_basepath: 
         if sftp is None:
             raise ConnectionError("Failed to initialize SFTP client.")
 
-        for local_file in files:
+        click.echo("Uploading:")
+
+        total_files = len(sorted_files)
+        for idx, local_file in enumerate(sorted_files, start=1):
             if local_file.is_dir():
                 continue
+
+            click.echo(f"[{idx}/{total_files}]", nl=False)
 
             remote_path = calculate_remote_path(
                 local_file, local_basepath, remote_basepath
@@ -295,10 +406,10 @@ def upload_sftp(host_config: Dict[str, Any], files: List[Path], local_basepath: 
                         pass  # Directory might exist
 
             try:
-                click.echo(f"Uploading {local_file} to {remote_path}...")
                 sftp.put(str(local_file), remote_path)
+                click.echo(f" ✅ {local_file} → {remote_path}")
             except Exception as e:
-                click.echo(f"Failed to upload {local_file}: {e}", err=True)
+                click.echo(f" ❌ {local_file} → {remote_path} ({e})", err=True)
 
         sftp.close()
         transport.close()
@@ -317,6 +428,71 @@ def load_ignore_file(path: Path) -> List[str]:
             ]
     except Exception:
         return []
+
+
+def collect_ignore_files(directory: Path, local_basepath: Path) -> List[str]:
+    """
+    Collect all .gsupload_ignore files from directory up to local_basepath.
+    Returns combined exclude patterns with additive behavior.
+
+    Args:
+        directory: Starting directory
+        local_basepath: Root directory (stops walking up here)
+
+    Returns:
+        List of exclude patterns from all .gsupload_ignore files found
+    """
+    all_excludes = []
+    current = directory
+
+    # Walk up from directory to local_basepath, collecting ignore files
+    while True:
+        ignore_file = current / ".gsupload_ignore"
+        if ignore_file.exists():
+            local_excludes = load_ignore_file(ignore_file)
+
+            # Adjust patterns to be relative to local_basepath
+            adjusted_excludes = []
+            try:
+                rel_dir = current.relative_to(local_basepath)
+            except ValueError:
+                rel_dir = Path(".")
+
+            for p in local_excludes:
+                if "/" in p.rstrip("/"):
+                    # Pattern has path components - anchor it to current directory
+                    clean_p = p
+                    if clean_p.startswith("/"):
+                        clean_p = clean_p[1:]
+
+                    # Construct pattern relative to local_basepath
+                    rel_dir_str = str(rel_dir).replace(os.sep, "/")
+                    if rel_dir_str == ".":
+                        new_p = "/" + clean_p
+                    else:
+                        new_p = "/" + rel_dir_str + "/" + clean_p
+
+                    adjusted_excludes.append(new_p)
+                else:
+                    # Simple name pattern - applies anywhere
+                    adjusted_excludes.append(p)
+
+            all_excludes.extend(adjusted_excludes)
+
+        # Stop if we've reached local_basepath or filesystem root
+        try:
+            if current.resolve() == local_basepath.resolve():
+                break
+        except (ValueError, OSError):
+            break
+
+        parent = current.parent
+        if parent == current:
+            # Reached filesystem root
+            break
+        current = parent
+
+    return all_excludes
 
 
 def is_excluded(path: Path, excludes: List[str], local_basepath: Path) -> bool:
@@ -397,44 +573,12 @@ def walk_directory(
     directory: Path, excludes: List[str], local_basepath: Path
 ) -> List[Path]:
     files = []
-    ignore_file = directory / ".gsuploadignore"
 
-    local_excludes = load_ignore_file(ignore_file)
-    adjusted_local_excludes = []
+    # Collect all .gsupload_ignore files from this directory up to local_basepath
+    ignore_excludes = collect_ignore_files(directory, local_basepath)
 
-    # Adjust local excludes to be relative to local_basepath
-    if local_excludes:
-        try:
-            rel_dir = directory.relative_to(local_basepath)
-        except ValueError:
-            rel_dir = Path(".")
-
-        for p in local_excludes:
-            if "/" in p.rstrip("/"):
-                # It has path components. Anchor it to the current directory.
-                # If p starts with /, it's anchored to current dir.
-                # If p doesn't start with /, it's also anchored to current dir because it has slashes.
-                # e.g. "foo/bar" in src/.gsuploadignore means "src/foo/bar".
-
-                clean_p = p
-                if clean_p.startswith("/"):
-                    clean_p = clean_p[1:]
-
-                # Construct new pattern: /rel_dir/clean_p
-                # We use forward slashes for patterns
-                rel_dir_str = str(rel_dir).replace(os.sep, "/")
-                if rel_dir_str == ".":
-                    new_p = "/" + clean_p
-                else:
-                    new_p = "/" + rel_dir_str + "/" + clean_p
-
-                adjusted_local_excludes.append(new_p)
-            else:
-                # No slash (e.g. "*.tmp"). Applies to names anywhere inside.
-                # Keep as is.
-                adjusted_local_excludes.append(p)
-
-    current_excludes = excludes + adjusted_local_excludes
+    # Combine with passed excludes
+    current_excludes = excludes + ignore_excludes
 
     try:
         entries = list(directory.iterdir())
@@ -458,8 +602,10 @@ def display_visual_comparison(
     local_files: List[Path],
     local_basepath: Path,
     protocol: str,
-    max_depth: int = 8,
+    binding_alias: str,
+    max_depth: int = DEFAULT_MAX_DEPTH,
     summary_only: bool = False,
+    complete_tree: bool = False,
 ) -> Tuple[int, int, int]:
     """
     Display tree comparison of local vs remote files before upload.
@@ -469,8 +615,10 @@ def display_visual_comparison(
         local_files: List of local Path objects to upload
         local_basepath: Local root directory
         protocol: 'ftp' or 'sftp'
-        max_depth: Maximum tree depth to display (default: 8)
+        binding_alias: Binding configuration alias name
+        max_depth: Maximum tree depth to display (default: DEFAULT_MAX_DEPTH)
         summary_only: If True, show only statistics without tree (default: False)
+        complete_tree: If True, show all files including remote-only (default: False)
 
     Returns:
         Tuple of (new_files_count, overwrite_count, remote_only_count)
@@ -491,7 +639,8 @@ def display_visual_comparison(
             continue
 
     # Connect and list remote files
-    click.echo(f"\n🔍 Connecting to {hostname}...")
+    click.echo(f"🔍 Connecting to {hostname}...")
+    click.echo(f"📌 Binding in use: {binding_alias}")
     remote_files = set()
 
     try:
@@ -500,7 +649,6 @@ def display_visual_comparison(
             ftp.connect(hostname, port, timeout=60)
             ftp.login(username, password or "")
 
-            click.echo("📡 Listing remote files...")
             remote_files = list_remote_ftp(ftp, remote_basepath, timeout=60)
 
             ftp.quit()
@@ -520,7 +668,6 @@ def display_visual_comparison(
             if sftp is None:
                 raise ConnectionError("Failed to initialize SFTP client.")
 
-            click.echo("📡 Listing remote files...")
             remote_files = list_remote_sftp(sftp, remote_basepath, timeout=60)
 
             sftp.close()
@@ -535,60 +682,113 @@ def display_visual_comparison(
     # Categorize files
     new_files = local_rel_paths - remote_files
     overwrite_files = local_rel_paths & remote_files
-    remote_only_files = remote_files - local_rel_paths
+
+    # Only calculate remote-only files if complete tree is requested (saves time)
+    remote_only_files = set()
+    if complete_tree:
+        remote_only_files = remote_files - local_rel_paths
 
     # Build tree structure
     if not summary_only:
-        tree_data = defaultdict(list)
+        # Build a proper tree structure with directories
+        tree_structure = {}
 
-        for path in sorted(new_files):
-            depth = path.count("/")
-            tree_data[depth].append((path, "[NEW]"))
+        def add_to_tree(path: str, status: str):
+            parts = path.split("/")
+            current = tree_structure
 
-        for path in sorted(overwrite_files):
-            depth = path.count("/")
-            tree_data[depth].append((path, "[OVERWRITE]"))
+            # Build directory structure
+            for i, part in enumerate(parts[:-1]):
+                if part not in current:
+                    current[part] = {"__type__": "dir", "__children__": {}}
+                current = current[part]["__children__"]
 
-        for path in sorted(remote_only_files):
-            depth = path.count("/")
-            tree_data[depth].append((path, "[REMOTE ONLY]"))
+            # Add file with status
+            filename = parts[-1]
+            current[filename] = {"__type__": "file", "__status__": status}
+
+        # Add all files to tree
+        for path in new_files:
+            add_to_tree(path, "[NEW]")
+        for path in overwrite_files:
+            add_to_tree(path, "[OVERWRITE]")
+
+        # Only add remote-only files if complete tree is requested
+        if complete_tree:
+            for path in remote_only_files:
+                add_to_tree(path, "[REMOTE ONLY]")
 
         # Display tree
-        click.echo(f"\n📂 File Comparison Tree (max depth: {max_depth}):\n")
+        tree_mode = "Complete" if complete_tree else "Changes Only"
+        click.echo(
+            f"\n📂 File Comparison Tree - {tree_mode} (max depth: {max_depth}):\n"
+        )
         click.echo(f"Local:  {local_basepath}")
         click.echo(f"Remote: {remote_basepath}\n")
+
+        if not complete_tree:
+            click.echo(
+                click.style(
+                    "... (remote-only files not shown, use -vcc or --visual-check-complete to see all)\n",
+                    dim=True,
+                )
+            )
 
         displayed_count = 0
         depth_exceeded_count = 0
 
-        for depth in sorted(tree_data.keys()):
+        def display_tree(node: dict, prefix: str = "", depth: int = 0):
+            nonlocal displayed_count, depth_exceeded_count
+
             if depth > max_depth:
-                depth_exceeded_count += len(tree_data[depth])
-                continue
+                # Count all items in this subtree
+                def count_items(n):
+                    count = 0
+                    for key, value in n.items():
+                        if value.get("__type__") == "file":
+                            count += 1
+                        elif value.get("__type__") == "dir":
+                            count += count_items(value.get("__children__", {}))
+                    return count
 
-            for path, status in tree_data[depth]:
-                # Build tree formatting
-                parts = path.split("/")
-                indent = ""
+                depth_exceeded_count += count_items(node)
+                return
 
-                for i in range(len(parts) - 1):
-                    indent += "│   "
+            items = sorted(node.items())
+            # Separate directories and files, directories first
+            dirs = [(k, v) for k, v in items if v.get("__type__") == "dir"]
+            files = [(k, v) for k, v in items if v.get("__type__") == "file"]
+            all_items = dirs + files
 
-                if len(parts) > 1:
-                    connector = "├── "
-                else:
-                    connector = ""
+            for idx, (name, value) in enumerate(all_items):
+                is_last = idx == len(all_items) - 1
+                connector = "└── " if is_last else "├── "
 
-                # Color status markers
-                if status == "[NEW]":
-                    colored_status = click.style(status, fg="green", bold=True)
-                elif status == "[OVERWRITE]":
-                    colored_status = click.style(status, fg="yellow", bold=True)
-                else:  # REMOTE ONLY
-                    colored_status = click.style(status, fg="blue", dim=True)
+                if value.get("__type__") == "dir":
+                    click.echo(f"{prefix}{connector}{name}/")
+                    displayed_count += 1
 
-                click.echo(f"{indent}{connector}{parts[-1]} {colored_status}")
-                displayed_count += 1
+                    # Prepare prefix for children
+                    extension = "    " if is_last else "│   "
+                    display_tree(
+                        value.get("__children__", {}), prefix + extension, depth + 1
+                    )
+
+                elif value.get("__type__") == "file":
+                    status = value.get("__status__", "")
+
+                    # Color status markers
+                    if status == "[NEW]":
+                        colored_status = click.style(status, fg="green", bold=True)
+                    elif status == "[OVERWRITE]":
+                        colored_status = click.style(status, fg="yellow", bold=True)
+                    else:  # REMOTE ONLY
+                        colored_status = click.style(status, fg="blue", dim=True)
+
+                    click.echo(f"{prefix}{connector}{name} {colored_status}")
+                    displayed_count += 1
+
+        display_tree(tree_structure)
 
         if depth_exceeded_count > 0:
             click.echo(
@@ -597,15 +797,23 @@ def display_visual_comparison(
 
     # Display summary
     click.echo(f"\n{'=' * 60}")
-    click.echo(f"📊 Summary:")
+    click.echo("📊 Summary:")
     click.echo(f"{'=' * 60}")
-    click.echo(f"  {click.style('New files:', fg='green')}        {len(new_files)}")
+    click.echo(f"  {click.style('New files:         ', fg='green')} {len(new_files)}")
     click.echo(
         f"  {click.style('Files to overwrite:', fg='yellow')} {len(overwrite_files)}"
     )
-    click.echo(
-        f"  {click.style('Remote only:', fg='blue')}       {len(remote_only_files)}"
-    )
+
+    # Calculate remote-only count efficiently (without creating the full set)
+    remote_only_count = len(remote_files) - len(overwrite_files)
+    if complete_tree:
+        click.echo(
+            f"  {click.style('Remote only:       ', fg='blue')} {len(remote_only_files)}"
+        )
+    else:
+        click.echo(
+            f"  {click.style('Remote only:       ', fg='blue')} {remote_only_count}"
+        )
     click.echo(f"{'=' * 60}\n")
 
     return (len(new_files), len(overwrite_files), len(remote_only_files))
@@ -676,7 +884,7 @@ def expand_files(
     return files
 
 
-@click.command()
+@click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option(
     "-r",
     "--recursive",
@@ -687,13 +895,19 @@ def expand_files(
     "-vc",
     "--visual-check",
     is_flag=True,
-    help="Display tree comparison of local vs remote files before uploading",
+    help="Display tree comparison of local vs remote files before uploading (shows changes only)",
+)
+@click.option(
+    "-vcc",
+    "--visual-check-complete",
+    is_flag=True,
+    help="Display complete tree comparison including remote-only files",
 )
 @click.option(
     "--max-depth",
-    default=8,
+    default=DEFAULT_MAX_DEPTH,
     type=int,
-    help="Maximum tree depth to display in visual check (default: 8)",
+    help=f"Maximum tree depth to display in visual check (default: {DEFAULT_MAX_DEPTH})",
 )
 @click.option(
     "-ts",
@@ -701,15 +915,37 @@ def expand_files(
     is_flag=True,
     help="Show summary statistics only, skip tree display in visual check",
 )
+@click.option(
+    "-f",
+    "--force",
+    is_flag=True,
+    help="Force upload without confirmation or remote file check (fastest mode)",
+)
+@click.option(
+    "-b",
+    "--binding",
+    "binding_alias",
+    default=None,
+    help="Binding alias from configuration. If omitted, auto-detects from current directory.",
+)
 @click.argument("patterns", nargs=-1, required=True)
-@click.argument("host_alias")
-def main(recursive, visual_check, max_depth, tree_summary, patterns, host_alias):
+def main(
+    recursive,
+    visual_check,
+    visual_check_complete,
+    max_depth,
+    tree_summary,
+    force,
+    binding_alias,
+    patterns,
+):
     """
     Upload files and directories to a remote FTP/SFTP server.
 
-    Uploads files matching PATTERNS to the remote server configured under HOST_ALIAS.
+    Uploads files matching PATTERNS to the remote server.
+    Use -b/--binding to specify the binding, or let it auto-detect from your current directory.
     The remote path is calculated relative to the local_basepath and remote_basepath
-    defined in your hosts.json configuration file.
+    defined in your .gsupload.json configuration file.
 
     \b
     PATTERNS can be:
@@ -719,24 +955,52 @@ def main(recursive, visual_check, max_depth, tree_summary, patterns, host_alias)
 
     \b
     Examples:
-      gsupload *.css frontend                    # Upload CSS files in current directory
-      gsupload -r *.css frontend                 # Upload CSS files recursively in all subdirectories
-      gsupload -vc *.css frontend                # Visual check before uploading CSS files
-      gsupload -vc -r *.js backend               # Visual check for recursive JS file upload
-      gsupload -vc --max-depth 5 -r *.html admin # Visual check with custom tree depth
-      gsupload -vc -ts *.css frontend            # Show summary only, no tree display
-      gsupload src/assets frontend               # Upload all files in src/assets directory
-      gsupload index.html app.js backend         # Upload specific files to backend host
+      gsupload *.css                                    # Auto-detect binding from current directory
+      gsupload -b=frontend *.css                        # Upload CSS files using 'frontend' binding
+      gsupload --binding=frontend *.css                 # Same as above (long form)
+      gsupload -r -b=frontend *.css                     # Upload CSS files recursively
+      gsupload -f -b=frontend *.css                     # Force upload without confirmation (fastest)
+      gsupload -vc -b=frontend *.css                    # Visual check (changes only) before upload
+      gsupload -vcc -b=frontend *.css                   # Visual check with complete tree
+      gsupload -vc -r -b=backend *.js                   # Visual check for recursive JS file upload
+      gsupload -vc --max-depth=5 -r -b=admin *.html     # Visual check with custom tree depth
+      gsupload -vc -ts -b=frontend *.css                # Show summary only, no tree display
+      gsupload -b=frontend src/assets                   # Upload all files in src/assets directory
+      gsupload -b=backend index.html app.js             # Upload specific files to backend host
 
     \b
     Configuration:
-      The script looks for hosts.json in:
-        - ./hosts.json
-        - ~/.gsupload/hosts.json
-        - ~/.config/gsupload/hosts.json
+      The script looks for configuration file in this order:
+        1. Looks for .gsupload.json in the current directory and parent directories (walks up until found). Filename starts with dot (".") on purpose.
+        2. ~/.gsupload/gsupload.json (no dot file)
+        3. ~/.config/gsupload/gsupload.json (no dot file)
+
     """
+    click.echo()
+
     config = load_config()
-    host_config = get_host_config(config, host_alias)
+
+    # Auto-detect binding if not provided
+    if binding_alias is None:
+        binding_alias = auto_detect_binding(config)
+        if binding_alias is None:
+            click.echo(
+                "Error: Could not auto-detect binding. Please specify binding with -b or --binding.",
+                err=True,
+            )
+            click.echo(
+                "\nAvailable bindings:",
+                err=True,
+            )
+            bindings = config.get("bindings", {})
+            for alias, binding_config in bindings.items():
+                click.echo(
+                    f"  - {alias}: {binding_config.get('local_basepath')}", err=True
+                )
+            sys.exit(1)
+        click.echo(f"🔍 Auto-detected binding: {binding_alias}")
+
+    host_config = get_host_config(config, binding_alias)
 
     local_basepath = Path(host_config["local_basepath"])
     if not local_basepath.exists():
@@ -755,17 +1019,30 @@ def main(recursive, visual_check, max_depth, tree_summary, patterns, host_alias)
         click.echo("No files found to upload.")
         sys.exit(0)
 
+    # Sort files by depth (external first) then alphabetically for consistent ordering
+    def sort_key(f: Path):
+        try:
+            rel_path = f.relative_to(local_basepath)
+            depth = len(rel_path.parts) - 1
+            return (depth, str(rel_path).lower())
+        except ValueError:
+            return (999, str(f).lower())
+
+    files_to_upload = sorted(files_to_upload, key=sort_key)
+
     protocol = host_config.get("protocol", "ftp").lower()
 
-    # Visual check before upload
-    if visual_check:
+    # Visual check before upload (skip if force mode enabled)
+    if not force and (visual_check or visual_check_complete):
         new_count, overwrite_count, remote_only_count = display_visual_comparison(
             host_config,
             files_to_upload,
             local_basepath,
             protocol,
+            binding_alias,
             max_depth,
             tree_summary,
+            complete_tree=visual_check_complete,
         )
 
         if not click.confirm("\n⚠️  Proceed with upload?", default=False):
@@ -783,6 +1060,8 @@ def main(recursive, visual_check, max_depth, tree_summary, patterns, host_alias)
             f"Error: Unsupported protocol '{protocol}'. Use 'ftp' or 'sftp'.", err=True
         )
         sys.exit(1)
+
+    click.echo()
 
 
 if __name__ == "__main__":

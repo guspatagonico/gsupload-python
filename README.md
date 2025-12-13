@@ -40,33 +40,43 @@ For development or if you prefer not to install globally:
 
 ## Configuration
 
-Create a `hosts.json` file in one of the following locations:
-- Current directory (`./hosts.json`)
-- `~/.gsupload/hosts.json`
-- `~/.config/gsupload/hosts.json`
+Create a configuration file in one of the following locations (searched in this order):
 
-### Example `hosts.json`
+1. **`.gsupload.json` in current directory or any parent directory** - The script walks up from your current working directory until it finds `.gsupload.json` (similar to how git finds `.git`). The filename starts with a dot (".") to keep it hidden in project directories.
+2. `~/.gsupload/gsupload.json` - User-specific global configuration (no dot prefix)
+3. `~/.config/gsupload/gsupload.json` - XDG config directory (no dot prefix)
+
+**Example:** If you have `/projects/myapp/.gsupload.json` and run the command from `/projects/myapp/src/components/`, the script will find and use the `.gsupload.json` from the project root.
+
+This allows you to:
+- Keep one `.gsupload.json` at your project root (hidden by default)
+- Run the upload command from any subdirectory within your project
+- Have different configurations for different projects
+
+### Example configuration file
 
 ```json
 {
-    "frontend": {
-        "protocol": "sftp",
-        "hostname": "example.com",
-        "port": 22,
-        "username": "user",
-        "password": "password",
-        "key_filename": "/path/to/private/key", 
-        "local_basepath": "/Users/gustavo/dev/project",
-        "remote_basepath": "/var/www/html"
-    },
-    "admin": {
-        "protocol": "ftp",
-        "hostname": "ftp.example.com",
-        "port": 21,
-        "username": "admin",
-        "password": "secretpassword",
-        "local_basepath": "/Users/gustavo/dev/project/admin",
-        "remote_basepath": "/public_html/admin"
+    "bindings": {
+        "frontend": {
+            "protocol": "sftp",
+            "hostname": "example.com",
+            "port": 22,
+            "username": "user",
+            "password": "password",
+            "key_filename": "/path/to/private/key", 
+            "local_basepath": "/Users/gustavo/dev/project",
+            "remote_basepath": "/var/www/html"
+        },
+        "admin": {
+            "protocol": "ftp",
+            "hostname": "ftp.example.com",
+            "port": 21,
+            "username": "admin",
+            "password": "secretpassword",
+            "local_basepath": "/Users/gustavo/dev/project/admin",
+            "remote_basepath": "/public_html/admin"
+        }
     }
 }
 ```
@@ -77,18 +87,18 @@ Create a `hosts.json` file in one of the following locations:
 
 You can exclude files from being uploaded in three ways:
 
-1.  **Global Excludes**: Add a `global_excludes` list to the top level of `hosts.json`.
-2.  **Host Excludes**: Add an `excludes` list to a specific host configuration in `hosts.json`.
-3.  **Folder Excludes**: Create a `.gsuploadignore` file in any directory.
+1.  **Global Excludes**: Add a `global_excludes` list to the top level of your configuration file.
+2.  **Host Excludes**: Add an `excludes` list to a specific host configuration.
+3.  **Folder Excludes**: Create a `.gsupload_ignore` file in any directory. The script walks up from the current directory to the project root, collecting all `.gsupload_ignore` files found along the way. Exclude patterns are **additive** - all ignore files in parent directories are also applied.
 
 **Supported Patterns:**
 - `*.log`: Matches any file ending in `.log` in any directory.
 - `node_modules`: Matches any file or folder named `node_modules` in any directory.
-- `/dist`: Matches `dist` folder only at the root (relative to `local_basepath` or `.gsuploadignore` location).
+- `/dist`: Matches `dist` folder only at the root (relative to `local_basepath` or `.gsupload_ignore` location).
 - `src/*.tmp`: Matches `.tmp` files directly inside `src`.
 - `src/**/*.tmp`: Matches `.tmp` files recursively inside `src`.
 
-**Example `hosts.json` with excludes:**
+**Example configuration with excludes:**
 
 ```json
 {
@@ -97,17 +107,19 @@ You can exclude files from being uploaded in three ways:
         "*.log",
         ".git"
     ],
-    "frontend": {
-        ...
-        "excludes": [
-            "node_modules",
-            "secrets.js"
-        ]
+    "bindings": {
+        "frontend": {
+            ...
+            "excludes": [
+                "node_modules",
+                "secrets.js"
+            ]
+        }
     }
 }
 ```
 
-**Example `.gsuploadignore`:**
+**Example `.gsupload_ignore`:**
 
 ```
 # Ignore all temporary files
@@ -119,59 +131,90 @@ local_config.php
 ## Usage
 
 ```bash
-gsupload [OPTIONS] PATTERNS... HOST_ALIAS
+gsupload [OPTIONS] PATTERNS...
 ```
 
 **Options:**
 - `-r, --recursive` - Search for files recursively in subdirectories when using glob patterns
 - `-vc, --visual-check` - Display tree comparison of local vs remote files before uploading
-- `--max-depth` - Maximum tree depth to display in visual check (default: 8)
+- `-vcc, --visual-check-complete` - Display complete tree comparison including remote-only files
+- `--max-depth` - Maximum tree depth to display in visual check (default: 20)
 - `-ts, --tree-summary` - Show summary statistics only, skip tree display in visual check
+- `-f, --force` - Force upload without confirmation or remote file check (fastest mode)
+- `-b, --binding` - Binding alias from configuration. If omitted, auto-detects from current directory
 
 **Arguments:**
 - `PATTERNS` - One or more file patterns, filenames, or directories to upload
-- `HOST_ALIAS` - The host configuration name from hosts.json
+
+**⚠️ IMPORTANT: Always Quote Glob Patterns!**
+
+When using glob patterns (like `*.txt`, `*.css`, or `src/**/*.js`), you **MUST** quote them to prevent shell expansion. Without quotes, your shell will expand the pattern before `gsupload` sees it, which will cause unexpected behavior or errors.
+
+```bash
+# ✅ CORRECT - Pattern is quoted, gsupload handles the glob
+gsupload -r "*.txt"
+gsupload -b=frontend "*.css"
+gsupload -b=backend "src/**/*.js"
+
+# ❌ WRONG - Shell expands the pattern before gsupload sees it
+gsupload -r *.txt       # Shell expands to: gsupload -r file1.txt file2.txt ...
+gsupload -r src/**/*.js # May fail or behave unexpectedly
+```
+
+**Why this matters:** Without quotes, if you have `file1.txt` and `file2.txt` in your current directory and run `gsupload -r *.txt`, your shell will expand this to `gsupload -r file1.txt file2.txt`, which only uploads those two files instead of recursively finding all `.txt` files as intended.
 
 ### Examples
 
-Upload all CSS files in the current directory only:
+Upload all CSS files in the current directory (auto-detect binding):
 ```bash
-gsupload *.css frontend
+gsupload "*.css"
+```
+
+Upload all CSS files using a specific binding:
+```bash
+gsupload -b=frontend "*.css"
+# or
+gsupload --binding=frontend "*.css"
+```
+
+Auto-detect binding from current directory:
+```bash
+gsupload "*.css"
 ```
 
 Upload all CSS files recursively (including subdirectories):
 ```bash
-gsupload -r *.css frontend
+gsupload -r -b=frontend "*.css"
 ```
 
 Preview changes before uploading with visual tree comparison:
 ```bash
-gsupload -vc *.css frontend
+gsupload -vc -b=frontend "*.css"
 ```
 
 Visual check with recursive search and custom tree depth:
 ```bash
-gsupload -vc --max-depth 5 -r *.js backend
+gsupload -vc --max-depth=5 -r -b=backend "*.js"
 ```
 
 Show summary statistics only (no tree display):
 ```bash
-gsupload -vc -ts *.html frontend
+gsupload -vc -ts -b=frontend "*.html"
 ```
 
 Upload a specific directory (always recursive for directories):
 ```bash
-gsupload src/assets frontend
+gsupload -b=frontend src/assets
 ```
 
 Upload multiple specific files:
 ```bash
-gsupload index.html style.css app.js frontend
+gsupload -b=frontend index.html style.css app.js
 ```
 
 Upload with a specific pattern in a subdirectory:
 ```bash
-gsupload src/**/*.js backend
+gsupload -b=backend "src/**/*.js"
 ```
 
 **Note:** If you installed locally without `uv tool`, use `python src/gsupload.py` instead of `gsupload`.
