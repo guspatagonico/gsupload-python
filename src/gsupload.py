@@ -15,29 +15,46 @@ DEFAULT_MAX_DEPTH = 20
 
 def load_config() -> Dict[str, Any]:
     """
-    Load configuration file.
+    Load and merge configuration files with inheritance.
 
-    Search order:
-    1. Current directory and parent directories - looks for .gsupload.json (dotfile)
-    2. ~/.gsupload/gsupload.json
-    3. ~/.config/gsupload/gsupload.json
+    Search order and merging:
+    1. Load global config from ~/.gsupload/gsupload.json or ~/.config/gsupload/gsupload.json (base)
+    2. Walk up from cwd collecting all .gsupload.json files
+    3. Merge configs from root to current directory (deeper configs override)
+
+    Merging rules:
+    - global_excludes: Additive (all patterns from all configs are combined)
+    - bindings: Deeper configs can override or add new bindings (deep merge per binding)
+    - Other top-level keys: Deeper configs override
 
     Returns:
-        Dictionary containing host configurations
+        Dictionary containing merged host configurations
     """
-    config_file = None
+    configs_to_merge = []
 
-    # First, try to find .gsupload.json in current directory or parent directories
+    # First, try to load global config as base
+    global_locations = [
+        Path.home() / ".gsupload" / "gsupload.json",
+        Path.home() / ".config" / "gsupload" / "gsupload.json",
+    ]
+
+    for loc in global_locations:
+        if loc.exists():
+            try:
+                with open(loc, "r") as f:
+                    configs_to_merge.append((loc, json.load(f)))
+                    break
+            except json.JSONDecodeError as e:
+                click.echo(f"Warning: Failed to parse '{loc}': {e}", err=True)
+
+    # Collect all .gsupload.json files from root down to cwd
+    project_configs = []
     current_dir = Path.cwd()
-    searched_paths = []
 
     while True:
         candidate = current_dir / ".gsupload.json"
-        searched_paths.append(candidate)
-
         if candidate.exists():
-            config_file = candidate
-            break
+            project_configs.append(candidate)
 
         # Move to parent directory
         parent = current_dir.parent
@@ -46,32 +63,57 @@ def load_config() -> Dict[str, Any]:
             break
         current_dir = parent
 
-    # If not found, check global config locations
-    if not config_file:
-        global_locations = [
-            Path.home() / ".gsupload" / "gsupload.json",
-            Path.home() / ".config" / "gsupload" / "gsupload.json",
-        ]
+    # Reverse to process from root to cwd (shallowest to deepest)
+    project_configs.reverse()
 
-        for loc in global_locations:
-            searched_paths.append(loc)
-            if loc.exists():
-                config_file = loc
-                break
+    # Load project configs
+    for config_path in project_configs:
+        try:
+            with open(config_path, "r") as f:
+                configs_to_merge.append((config_path, json.load(f)))
+        except json.JSONDecodeError as e:
+            click.echo(f"Warning: Failed to parse '{config_path}': {e}", err=True)
 
-    if not config_file:
+    if not configs_to_merge:
+        searched_paths = global_locations + [Path.cwd() / ".gsupload.json"]
         click.echo(
             f"Error: Configuration file not found. Checked: {', '.join(str(p) for p in searched_paths)}",
             err=True,
         )
         sys.exit(1)
 
-    try:
-        with open(config_file, "r") as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
-        click.echo(f"Error: Failed to parse '{config_file}': {e}", err=True)
-        sys.exit(1)
+    # Merge all configs
+    merged_config = {}
+    all_global_excludes = []
+
+    for config_path, config in configs_to_merge:
+        # Collect global_excludes additively
+        if "global_excludes" in config:
+            all_global_excludes.extend(config["global_excludes"])
+
+        # Merge bindings (deep merge - each binding can be overridden independently)
+        if "bindings" in config:
+            if "bindings" not in merged_config:
+                merged_config["bindings"] = {}
+
+            for binding_name, binding_config in config["bindings"].items():
+                if binding_name in merged_config["bindings"]:
+                    # Merge/override this binding
+                    merged_config["bindings"][binding_name].update(binding_config)
+                else:
+                    # New binding
+                    merged_config["bindings"][binding_name] = binding_config.copy()
+
+        # Other top-level keys: simple override
+        for key in config:
+            if key not in ["global_excludes", "bindings"]:
+                merged_config[key] = config[key]
+
+    # Set the combined global_excludes
+    if all_global_excludes:
+        merged_config["global_excludes"] = all_global_excludes
+
+    return merged_config
 
 
 def get_host_config(config: Dict[str, Any], alias: str) -> Dict[str, Any]:
