@@ -1,3 +1,9 @@
+## 0.5.0 (2025-12-13)
+
+### Feat
+
+- **cli**: add config inspection and ignore listing tools
+
 ## 0.4.0 (2025-12-13)
 
 ### Feat
