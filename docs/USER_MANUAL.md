@@ -63,8 +63,11 @@ After installation, `gsupload` is available from any directory without activatin
 For development or testing:
 
 ```bash
-# Clone repository
-git clone <repository-url>
+# Clone repository (HTTPS)
+git clone https://github.com/guspatagonico/gsupload-python.git
+# or SSH (with password-protected key)
+git clone git@github.com:guspatagonico/gsupload-python.git
+
 cd gsupload-python
 
 # Install dependencies
