@@ -1,3 +1,13 @@
+## 1.0.0a0 (2025-12-14)
+
+### BREAKING CHANGE
+
+- Minor configuration and default behavior modifications.
+
+### Feat
+
+- **upload**: add performance optimizations and enhanced connection handling
+
 ## 0.5.0 (2025-12-13)
 
 ### Feat
