@@ -4,13 +4,27 @@ import os
 import sys
 import glob
 import ftplib
+import socket
 import click
 import paramiko
 import fnmatch
+import logging
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Set, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 DEFAULT_MAX_DEPTH = 20
+
+# Suppress paramiko's verbose error messages
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
+
+
+def display_comment(comment: str, prefix: str = "💬"):
+    """Display a comment with appropriate styling."""
+    if comment:
+        click.echo(click.style(f"{prefix} {comment}", fg="cyan", dim=True))
 
 
 def load_config_with_sources() -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -325,6 +339,7 @@ def auto_detect_binding(config: Dict[str, Any]) -> Optional[str]:
 
     Returns the binding alias if found, None otherwise.
     Prioritizes the most specific match (deepest path).
+    If multiple bindings point to the same local_basepath, prompts user to choose.
     """
     bindings = config.get("bindings", {})
     if not bindings:
@@ -345,7 +360,7 @@ def auto_detect_binding(config: Dict[str, Any]) -> Optional[str]:
         try:
             # Check if cwd is within this binding's basepath
             cwd.relative_to(local_basepath)
-            matches.append((alias, local_basepath))
+            matches.append((alias, local_basepath, binding_config))
         except ValueError:
             # cwd is not within this basepath
             continue
@@ -355,6 +370,77 @@ def auto_detect_binding(config: Dict[str, Any]) -> Optional[str]:
 
     # Return the most specific match (longest/deepest path)
     matches.sort(key=lambda x: len(str(x[1])), reverse=True)
+
+    # Check if multiple bindings point to the exact same local_basepath
+    best_match_path = matches[0][1]
+    same_path_bindings = [
+        (alias, cfg) for alias, path, cfg in matches if path == best_match_path
+    ]
+
+    if len(same_path_bindings) > 1:
+        # Multiple bindings for the same path - let user choose
+        click.echo(
+            click.style(
+                f"\n⚠️  WARNING: Multiple bindings detected for path: {best_match_path}",
+                fg="yellow",
+                bold=True,
+            )
+        )
+        click.echo(
+            click.style(
+                "This could indicate a configuration issue. Please select the binding to use:\n",
+                fg="yellow",
+            )
+        )
+
+        # Display options
+        for idx, (alias, cfg) in enumerate(same_path_bindings, start=1):
+            protocol = cfg.get("protocol", "ftp").upper()
+            hostname = cfg.get("hostname", "N/A")
+            comment = cfg.get("comments", "")
+
+            click.echo(
+                f"  {click.style(str(idx), fg='cyan', bold=True)}. {click.style(alias, fg='green', bold=True)} - {protocol} to {hostname}"
+            )
+            if comment:
+                click.echo(f"     {click.style(comment, fg='cyan', dim=True)}")
+
+        click.echo(f"  {click.style('0', fg='red', bold=True)}. Cancel and exit")
+
+        # Get user choice
+        while True:
+            try:
+                choice = click.prompt(
+                    "\nSelect binding",
+                    type=int,
+                    default=1,
+                    show_default=True,
+                )
+
+                if choice == 0:
+                    click.echo("Operation cancelled.")
+                    sys.exit(0)
+                elif 1 <= choice <= len(same_path_bindings):
+                    selected_alias = same_path_bindings[choice - 1][0]
+                    click.echo(
+                        click.style(
+                            f"✓ Selected binding: {selected_alias}",
+                            fg="green",
+                        )
+                    )
+                    return selected_alias
+                else:
+                    click.echo(
+                        click.style(
+                            f"Invalid choice. Please enter 0-{len(same_path_bindings)}",
+                            fg="red",
+                        ),
+                        err=True,
+                    )
+            except (ValueError, click.Abort):
+                click.echo("\nOperation cancelled.")
+                sys.exit(0)
+
     return matches[0][0]
 
 
@@ -381,6 +467,7 @@ def list_remote_ftp(
 ) -> Set[str]:
     """
     Recursively list all files on FTP server starting from remote_basepath.
+    Uses parallel connections for faster directory scanning.
 
     Args:
         ftp: Active FTP connection
@@ -391,26 +478,38 @@ def list_remote_ftp(
     Returns:
         Set of relative file paths from remote_basepath
     """
+    from queue import Queue
+
     remote_files = set()
     remote_base = remote_basepath.rstrip("/")
+    dirs_scanned = 0
+    files_found = 0
+    files_lock = Lock()
+    dirs_queue = Queue()
+    dirs_queue.put(remote_base)
 
-    # Set socket timeout
-    if ftp.sock:
-        ftp.sock.settimeout(timeout)
+    # Get FTP credentials from initial connection
+    # We need to extract these to create new connections
+    ftp_host = ftp.host
+    ftp_port = ftp.port or 21
 
-    def list_directory(path: str):
+    def scan_directory(path: str, conn: ftplib.FTP) -> tuple:
+        """Scan a single directory and return (files, subdirs)"""
+        found_files = []
+        found_dirs = []
+
         try:
             # Try using MLSD for better metadata (if supported)
             entries = []
             try:
-                for name, facts in ftp.mlsd(path):
+                for name, facts in conn.mlsd(path):
                     if name in (".", ".."):
                         continue
                     entries.append((name, facts.get("type") == "dir"))
             except (ftplib.error_perm, AttributeError):
                 # MLSD not supported, fall back to NLST + checking each
                 try:
-                    names = ftp.nlst(path)
+                    names = conn.nlst(path)
                     for full_path in names:
                         name = os.path.basename(full_path)
                         if name in (".", ".."):
@@ -418,21 +517,21 @@ def list_remote_ftp(
                         # Try to detect if it's a directory
                         is_dir = False
                         try:
-                            current = ftp.pwd()
-                            ftp.cwd(full_path)
-                            ftp.cwd(current)
+                            current = conn.pwd()
+                            conn.cwd(full_path)
+                            conn.cwd(current)
                             is_dir = True
                         except ftplib.error_perm:
                             is_dir = False
                         entries.append((name, is_dir))
                 except ftplib.error_perm:
-                    return
+                    return (found_files, found_dirs)
 
             for name, is_dir in entries:
                 full_path = f"{path}/{name}".replace("//", "/")
 
                 if is_dir:
-                    list_directory(full_path)
+                    found_dirs.append(full_path)
                 else:
                     # Calculate relative path from remote_basepath
                     if full_path.startswith(remote_base + "/"):
@@ -443,12 +542,38 @@ def list_remote_ftp(
                         rel_path = full_path
 
                     if rel_path:
-                        remote_files.add(rel_path)
+                        found_files.append(rel_path)
 
         except Exception:
             pass  # Ignore permission errors or inaccessible directories
 
-    list_directory(remote_base)
+        return (found_files, found_dirs)
+
+    # Note: FTP doesn't support true parallel connections well due to protocol limitations
+    # But we can still optimize by using iterative BFS approach
+    while not dirs_queue.empty():
+        path = dirs_queue.get()
+
+        dirs_scanned += 1
+        if dirs_scanned % 5 == 0:
+            click.echo(
+                f"\r🔍 Scanning... {dirs_scanned} dirs, {files_found} files found",
+                nl=False,
+            )
+
+        found_files, found_dirs = scan_directory(path, ftp)
+
+        remote_files.update(found_files)
+        files_found += len(found_files)
+
+        for d in found_dirs:
+            dirs_queue.put(d)
+
+    # Clear the progress line and show final count
+    click.echo(
+        f"\r✅ Found {files_found} files in {dirs_scanned} directories" + " " * 20
+    )
+
     return remote_files
 
 
@@ -457,72 +582,179 @@ def list_remote_sftp(
     remote_basepath: str,
     timeout: int = 60,
     progress_bar=None,
+    max_workers: int = 3,
 ) -> Set[str]:
     """
     Recursively list all files on SFTP server starting from remote_basepath.
+    Uses parallel connections for faster directory scanning.
 
     Args:
         sftp: Active SFTP connection
         remote_basepath: Remote root directory to start listing from
         timeout: Keepalive interval in seconds (default: 60)
         progress_bar: Optional click progressbar to update as files are found
+        max_workers: Number of parallel scanning workers (default: 3)
 
     Returns:
         Set of relative file paths from remote_basepath
     """
+    from queue import Queue
+
     remote_files = set()
     remote_base = remote_basepath.rstrip("/")
+    dirs_scanned = 0
+    files_found = 0
+    files_lock = Lock()
+    dirs_queue = Queue()
+    dirs_queue.put(remote_base)
 
-    # Set keepalive to prevent timeout
-    channel = sftp.get_channel()
-    if channel:
-        transport = channel.get_transport()
-        if transport:
-            transport.set_keepalive(30)
+    def scan_directory(path: str, worker_sftp: paramiko.SFTPClient) -> tuple:
+        """Scan a single directory and return (files, subdirs)"""
+        found_files = []
+        found_dirs = []
 
-    def list_directory(path: str):
         try:
-            entries = sftp.listdir_attr(path)
+            # Try listdir_attr first (provides file attributes)
+            entries = []
+            use_attr = False
+            try:
+                attr_entries = worker_sftp.listdir_attr(path)
+                entries = [(e.filename, e.st_mode) for e in attr_entries]
+                use_attr = True
+            except Exception:
+                # Fallback to simple listdir if listdir_attr not supported
+                try:
+                    simple_entries = worker_sftp.listdir(path)
+                    entries = [(name, None) for name in simple_entries]
+                except Exception:
+                    return (found_files, found_dirs)
 
-            for entry in entries:
-                if entry.filename in (".", ".."):
+            for filename, st_mode in entries:
+                if filename in (".", ".."):
                     continue
 
-                full_path = f"{path}/{entry.filename}".replace("//", "/")
+                full_path = f"{path}/{filename}".replace("//", "/")
 
-                # Check if it's a directory using stat
-                try:
+                # Check if it's a directory
+                is_dir = False
+                if use_attr and st_mode is not None:
                     import stat
 
-                    if entry.st_mode is not None and stat.S_ISDIR(entry.st_mode):
-                        list_directory(full_path)
-                    else:
-                        # Calculate relative path from remote_basepath
-                        if full_path.startswith(remote_base + "/"):
-                            rel_path = full_path[len(remote_base) + 1 :]
-                        elif full_path == remote_base:
-                            rel_path = ""
-                        else:
-                            rel_path = full_path
+                    is_dir = stat.S_ISDIR(st_mode)
+                else:
+                    # Try to list it as a directory to determine type
+                    try:
+                        worker_sftp.listdir(full_path)
+                        is_dir = True
+                    except Exception:
+                        is_dir = False
 
-                        if rel_path:
-                            remote_files.add(rel_path)
-                except Exception:
-                    pass  # Treat as file if stat fails
+                if is_dir:
+                    found_dirs.append(full_path)
+                else:
+                    # Calculate relative path from remote_basepath
+                    if full_path.startswith(remote_base + "/"):
+                        rel_path = full_path[len(remote_base) + 1 :]
+                    elif full_path == remote_base:
+                        rel_path = ""
+                    else:
+                        rel_path = full_path
+
+                    if rel_path:
+                        found_files.append(rel_path)
 
         except Exception:
-            pass  # Ignore permission errors or inaccessible directories
+            pass  # Ignore all errors
 
-    list_directory(remote_base)
+        return (found_files, found_dirs)
+
+    def worker_scan(worker_sftp: paramiko.SFTPClient):
+        """Worker function to scan directories from queue"""
+        nonlocal dirs_scanned, files_found
+
+        while True:
+            try:
+                path = dirs_queue.get_nowait()
+            except:
+                break
+
+            with files_lock:
+                dirs_scanned += 1
+                if dirs_scanned % 5 == 0:
+                    click.echo(
+                        f"\r🔍 Scanning... {dirs_scanned} dirs, {files_found} files found",
+                        nl=False,
+                    )
+
+            found_files, found_dirs = scan_directory(path, worker_sftp)
+
+            with files_lock:
+                remote_files.update(found_files)
+                files_found += len(found_files)
+
+            for d in found_dirs:
+                dirs_queue.put(d)
+
+    # Get SSH connection info to create worker connections
+    channel = sftp.get_channel()
+    if not channel:
+        # Fallback to single-threaded if no channel available
+        dirs_queue_list = []
+        while not dirs_queue.empty():
+            path = dirs_queue.get()
+            dirs_scanned += 1
+            if dirs_scanned % 5 == 0:
+                click.echo(
+                    f"\r🔍 Scanning... {dirs_scanned} dirs, {files_found} files found",
+                    nl=False,
+                )
+            found_files, found_dirs = scan_directory(path, sftp)
+            remote_files.update(found_files)
+            files_found += len(found_files)
+            for d in found_dirs:
+                dirs_queue.put(d)
+    else:
+        transport = channel.get_transport()
+        if transport:
+            # Use iterative approach with single connection for better SFTP compatibility
+            # Many SFTP servers don't handle multiple simultaneous connections well
+            while not dirs_queue.empty():
+                path = dirs_queue.get()
+
+                dirs_scanned += 1
+                if dirs_scanned % 3 == 0:  # More frequent updates for SFTP
+                    click.echo(
+                        f"\r🔍 Scanning... {dirs_scanned} dirs, {files_found} files found",
+                        nl=False,
+                    )
+
+                found_files, found_dirs = scan_directory(path, sftp)
+                remote_files.update(found_files)
+                files_found += len(found_files)
+
+                for d in found_dirs:
+                    dirs_queue.put(d)
+
+    # Clear the progress line and show final count
+    click.echo(
+        f"\r✅ Found {files_found} files in {dirs_scanned} directories" + " " * 20
+    )
+
     return remote_files
 
 
-def upload_ftp(host_config: Dict[str, Any], files: List[Path], local_basepath: Path):
+def upload_ftp(
+    host_config: Dict[str, Any],
+    files: List[Path],
+    local_basepath: Path,
+    use_pasv: bool = True,
+):
     hostname = host_config["hostname"]
     port = host_config.get("port", 21)
     username = host_config["username"]
     password = host_config["password"]
     remote_basepath = host_config["remote_basepath"]
+    max_workers = host_config.get("max_workers", 5)  # Parallel uploads
 
     # Sort files by depth (external first) then alphabetically
     def sort_key(f: Path):
@@ -535,51 +767,81 @@ def upload_ftp(host_config: Dict[str, Any], files: List[Path], local_basepath: P
 
     sorted_files = sorted(files, key=sort_key)
 
-    try:
-        ftp = ftplib.FTP()
-        ftp.connect(hostname, port)
-        ftp.login(username, password)
+    # Cache for created directories (shared across threads)
+    created_dirs = set()
+    dir_lock = Lock()
 
-        click.echo("Uploading:")
+    # Progress tracking
+    completed = 0
+    completed_lock = Lock()
+    total_files = len([f for f in sorted_files if not f.is_dir()])
 
-        total_files = len(sorted_files)
-        for idx, local_file in enumerate(sorted_files, start=1):
-            if local_file.is_dir():
-                continue  # Directories are handled by walking or creating, but here we expect a list of files
+    def upload_single_file(local_file: Path) -> Tuple[bool, str, str]:
+        """Upload a single file. Returns (success, local_path, message)"""
+        if local_file.is_dir():
+            return (True, str(local_file), "skipped (directory)")
 
-            click.echo(f"[{idx}/{total_files}]", nl=False)
+        try:
+            # Each thread needs its own FTP connection
+            ftp = ftplib.FTP()
+            ftp.connect(hostname, port, timeout=60)
+            ftp.login(username, password)
+            ftp.set_pasv(use_pasv)  # Enable passive mode (default) or active mode
 
             remote_path = calculate_remote_path(
                 local_file, local_basepath, remote_basepath
             )
             remote_dir = os.path.dirname(remote_path)
 
-            # Ensure remote directory exists
-            path_parts = remote_dir.split("/")
-            current_path = ""
-            for part in path_parts:
-                if not part:
-                    continue
-                current_path += "/" + part
-                try:
-                    ftp.cwd(current_path)
-                except ftplib.error_perm:
-                    try:
-                        ftp.mkd(current_path)
-                    except ftplib.error_perm:
-                        pass  # Directory might exist or permission denied
+            # Ensure remote directory exists (with caching)
+            with dir_lock:
+                if remote_dir not in created_dirs:
+                    path_parts = remote_dir.split("/")
+                    current_path = ""
+                    for part in path_parts:
+                        if not part:
+                            continue
+                        current_path += "/" + part
+                        if current_path not in created_dirs:
+                            try:
+                                ftp.cwd(current_path)
+                                created_dirs.add(current_path)
+                            except ftplib.error_perm:
+                                try:
+                                    ftp.mkd(current_path)
+                                    created_dirs.add(current_path)
+                                except ftplib.error_perm:
+                                    pass  # Directory might exist
 
-            try:
-                with open(local_file, "rb") as f:
-                    ftp.storbinary(f"STOR {remote_path}", f)
-                click.echo(f" ✅ {local_file} → {remote_path}")
-            except Exception as e:
-                click.echo(f" ❌ {local_file} → {remote_path} ({e})", err=True)
+            # Upload the file
+            with open(local_file, "rb") as f:
+                ftp.storbinary(f"STOR {remote_path}", f)
 
-        ftp.quit()
-    except Exception as e:
-        click.echo(f"FTP Error: {e}", err=True)
-        sys.exit(1)
+            ftp.quit()
+            return (True, str(local_file), remote_path)
+
+        except Exception as e:
+            return (False, str(local_file), str(e))
+
+    click.echo("Uploading with parallel connections...")
+
+    # Upload files in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_file = {
+            executor.submit(upload_single_file, f): f for f in sorted_files
+        }
+
+        for future in as_completed(future_to_file):
+            success, local_path, message = future.result()
+
+            with completed_lock:
+                completed += 1
+                click.echo(f"[{completed}/{total_files}] ", nl=False)
+
+            if success:
+                click.echo(f"✅ {local_path} → {message}")
+            else:
+                click.echo(f"❌ {local_path} ({message})", err=True)
 
 
 def upload_sftp(host_config: Dict[str, Any], files: List[Path], local_basepath: Path):
@@ -589,6 +851,7 @@ def upload_sftp(host_config: Dict[str, Any], files: List[Path], local_basepath: 
     password = host_config.get("password")
     key_filename = host_config.get("key_filename")
     remote_basepath = host_config["remote_basepath"]
+    max_workers = host_config.get("max_workers", 5)  # Parallel uploads
 
     # Sort files by depth (external first) then alphabetically
     def sort_key(f: Path):
@@ -601,58 +864,97 @@ def upload_sftp(host_config: Dict[str, Any], files: List[Path], local_basepath: 
 
     sorted_files = sorted(files, key=sort_key)
 
-    try:
-        transport = paramiko.Transport((hostname, port))
-        if key_filename:
-            key = paramiko.RSAKey.from_private_key_file(key_filename)
-            transport.connect(username=username, pkey=key)
-        else:
-            transport.connect(username=username, password=password)
+    # Cache for created directories (shared across threads)
+    created_dirs = set()
+    dir_lock = Lock()
 
-        sftp = paramiko.SFTPClient.from_transport(transport)
-        if sftp is None:
-            raise ConnectionError("Failed to initialize SFTP client.")
+    # Progress tracking
+    completed = 0
+    completed_lock = Lock()
+    total_files = len([f for f in sorted_files if not f.is_dir()])
 
-        click.echo("Uploading:")
+    def upload_single_file(local_file: Path) -> Tuple[bool, str, str]:
+        """Upload a single file. Returns (success, local_path, message)"""
+        if local_file.is_dir():
+            return (True, str(local_file), "skipped (directory)")
 
-        total_files = len(sorted_files)
-        for idx, local_file in enumerate(sorted_files, start=1):
-            if local_file.is_dir():
-                continue
+        try:
+            # Each thread needs its own SSH/SFTP connection
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-            click.echo(f"[{idx}/{total_files}]", nl=False)
+            # Enable SSH compression for faster uploads
+            if key_filename:
+                ssh.connect(
+                    hostname,
+                    port,
+                    username,
+                    key_filename=key_filename,
+                    timeout=60,
+                    compress=True,
+                )
+            else:
+                ssh.connect(
+                    hostname, port, username, password, timeout=60, compress=True
+                )
+
+            sftp = ssh.open_sftp()
 
             remote_path = calculate_remote_path(
                 local_file, local_basepath, remote_basepath
             )
             remote_dir = os.path.dirname(remote_path)
 
-            # Ensure remote directory exists
-            path_parts = remote_dir.split("/")
-            current_path = ""
-            for part in path_parts:
-                if not part:
-                    continue
-                current_path += "/" + part
-                try:
-                    sftp.stat(current_path)
-                except FileNotFoundError:
-                    try:
-                        sftp.mkdir(current_path)
-                    except OSError:
-                        pass  # Directory might exist
+            # Ensure remote directory exists (with caching)
+            with dir_lock:
+                if remote_dir not in created_dirs:
+                    path_parts = remote_dir.split("/")
+                    current_path = ""
+                    for part in path_parts:
+                        if not part:
+                            continue
+                        current_path += "/" + part
+                        if current_path not in created_dirs:
+                            try:
+                                sftp.stat(current_path)
+                                created_dirs.add(current_path)
+                            except Exception:
+                                try:
+                                    sftp.mkdir(current_path)
+                                    created_dirs.add(current_path)
+                                except Exception:
+                                    pass  # Directory might exist
 
-            try:
-                sftp.put(str(local_file), remote_path)
-                click.echo(f" ✅ {local_file} → {remote_path}")
-            except Exception as e:
-                click.echo(f" ❌ {local_file} → {remote_path} ({e})", err=True)
+            # Upload the file
+            sftp.put(str(local_file), remote_path)
 
-        sftp.close()
-        transport.close()
-    except Exception as e:
-        click.echo(f"SFTP Error: {e}", err=True)
-        sys.exit(1)
+            sftp.close()
+            ssh.close()
+            return (True, str(local_file), remote_path)
+
+        except Exception as e:
+            return (False, str(local_file), str(e))
+
+    click.echo("✅ SFTP connection established")
+    click.echo("Uploading with compression + parallel connections...")
+
+    # Upload files in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_file = {
+            executor.submit(upload_single_file, f): f for f in sorted_files
+        }
+
+        for future in as_completed(future_to_file):
+            success, local_path, message = future.result()
+
+            with completed_lock:
+                completed += 1
+                click.echo(f"[{completed}/{total_files}] ", nl=False)
+
+            if success:
+                click.echo(f"✅ {local_path} → {message}")
+            else:
+                click.echo(f"❌ {local_path} ({message})", err=True)
 
 
 def load_ignore_file(path: Path) -> List[str]:
@@ -878,6 +1180,11 @@ def display_visual_comparison(
     # Connect and list remote files
     click.echo(f"🔍 Connecting to {hostname}...")
     click.echo(f"📌 Binding in use: {binding_alias}")
+
+    # Display binding comment if present
+    if "comments" in host_config:
+        display_comment(host_config["comments"], prefix="📝")
+
     remote_files = set()
 
     try:
@@ -885,33 +1192,184 @@ def display_visual_comparison(
             ftp = ftplib.FTP()
             ftp.connect(hostname, port, timeout=60)
             ftp.login(username, password or "")
+            ftp.set_pasv(True)  # Use passive mode by default
 
+            scan_start = time.time()
             remote_files = list_remote_ftp(ftp, remote_basepath, timeout=60)
+            scan_elapsed = time.time() - scan_start
+
+            # Display scan time
+            days = int(scan_elapsed // 86400)
+            hours = int((scan_elapsed % 86400) // 3600)
+            minutes = int((scan_elapsed % 3600) // 60)
+            seconds = scan_elapsed % 60
+
+            time_parts = []
+            if days > 0:
+                time_parts.append(f"{days}d")
+            if hours > 0 or days > 0:
+                time_parts.append(f"{hours}h")
+            if minutes > 0 or hours > 0 or days > 0:
+                time_parts.append(f"{minutes}m")
+            time_parts.append(f"{seconds:.2f}s")
+
+            click.echo(f"⏱️  Scan completed in {' '.join(time_parts)}")
 
             ftp.quit()
 
         elif protocol == "sftp":
             key_filename = host_config.get("key_filename")
-            transport = paramiko.Transport((hostname, port))
-            transport.banner_timeout = 60
 
-            if key_filename:
-                key = paramiko.RSAKey.from_private_key_file(key_filename)
-                transport.connect(username=username, pkey=key)
-            else:
-                transport.connect(username=username, password=password)
+            # Use SSHClient for better compatibility and automatic host key handling
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-            sftp = paramiko.SFTPClient.from_transport(transport)
-            if sftp is None:
-                raise ConnectionError("Failed to initialize SFTP client.")
+            try:
+                # Retry connection with multiple strategies for problematic servers
+                max_retries = 4
+                retry_count = 0
+                connection_successful = False
 
-            remote_files = list_remote_sftp(sftp, remote_basepath, timeout=60)
+                while retry_count < max_retries and not connection_successful:
+                    try:
+                        # Progressive timeout and connection strategy
+                        if retry_count == 0:
+                            # First attempt: standard settings with longer timeout
+                            timeout_value = 120
+                            use_compression = True
+                            gss_auth = True
+                            look_for_keys = True
+                            click.echo(
+                                "📡 Attempting connection with standard settings..."
+                            )
+                        elif retry_count == 1:
+                            # Second attempt: disable compression (can cause issues)
+                            timeout_value = 150
+                            use_compression = False
+                            gss_auth = True
+                            look_for_keys = True
+                            click.echo("⏳ Retry 1/3: Disabling compression...")
+                        elif retry_count == 2:
+                            # Third attempt: disable GSS-API auth (can cause delays)
+                            timeout_value = 180
+                            use_compression = False
+                            gss_auth = False
+                            look_for_keys = False
+                            click.echo(
+                                "⏳ Retry 2/3: Disabling GSS auth and key scanning..."
+                            )
+                        else:
+                            # Final attempt: maximum timeout, all optimizations
+                            timeout_value = 240
+                            use_compression = False
+                            gss_auth = False
+                            look_for_keys = False
+                            click.echo("⏳ Retry 3/3: Maximum timeout (240s)...")
 
-            sftp.close()
-            transport.close()
+                        if key_filename:
+                            ssh.connect(
+                                hostname,
+                                port=port,
+                                username=username,
+                                key_filename=key_filename,
+                                timeout=timeout_value,
+                                banner_timeout=timeout_value,
+                                auth_timeout=timeout_value,
+                                compress=use_compression,
+                                gss_auth=gss_auth,
+                                look_for_keys=look_for_keys,
+                                allow_agent=False,  # Disable SSH agent
+                            )
+                        else:
+                            ssh.connect(
+                                hostname,
+                                port=port,
+                                username=username,
+                                password=password,
+                                timeout=timeout_value,
+                                banner_timeout=timeout_value,
+                                auth_timeout=timeout_value,
+                                compress=use_compression,
+                                gss_auth=gss_auth,
+                                look_for_keys=look_for_keys,
+                                allow_agent=False,  # Disable SSH agent
+                            )
+
+                        connection_successful = True
+                        click.echo("✅ SFTP connection established")
+
+                    except (
+                        paramiko.SSHException,
+                        socket.timeout,
+                        socket.error,
+                    ) as conn_error:
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            click.echo(
+                                click.style(
+                                    f"⚠️  Connection attempt {retry_count} failed: {conn_error}",
+                                    fg="yellow",
+                                )
+                            )
+                            time.sleep(3)  # Wait before retry
+                        else:
+                            # Final attempt failed
+                            click.echo(
+                                click.style(
+                                    f"❌ All {max_retries} connection attempts failed.",
+                                    fg="red",
+                                    bold=True,
+                                )
+                            )
+                            click.echo(
+                                click.style(
+                                    "💡 Tip: This server may have connection rate limiting or firewall issues.",
+                                    fg="cyan",
+                                )
+                            )
+                            raise
+
+                # Open SFTP session
+                sftp = ssh.open_sftp()
+
+                click.echo("🔍 Listing remote files...")
+                scan_start = time.time()
+                remote_files = list_remote_sftp(sftp, remote_basepath, timeout=60)
+                scan_elapsed = time.time() - scan_start
+
+                # Display scan time
+                days = int(scan_elapsed // 86400)
+                hours = int((scan_elapsed % 86400) // 3600)
+                minutes = int((scan_elapsed % 3600) // 60)
+                seconds = scan_elapsed % 60
+
+                time_parts = []
+                if days > 0:
+                    time_parts.append(f"{days}d")
+                if hours > 0 or days > 0:
+                    time_parts.append(f"{hours}h")
+                if minutes > 0 or hours > 0 or days > 0:
+                    time_parts.append(f"{minutes}m")
+                time_parts.append(f"{seconds:.2f}s")
+
+                click.echo(f"⏱️  Scan completed in {' '.join(time_parts)}")
+
+                sftp.close()
+                ssh.close()
+
+            except Exception as ssh_error:
+                if ssh:
+                    ssh.close()
+                raise
 
     except Exception as e:
-        click.echo(f"\n⚠️  Warning: Failed to list remote files: {e}", err=True)
+        click.echo(
+            f"\n⚠️  Warning: Failed to list remote files: {type(e).__name__}: {e}",
+            err=True,
+        )
+        import traceback
+
+        click.echo(f"Traceback:\n{traceback.format_exc()}", err=True)
         if not click.confirm("Proceed with upload without comparison?", default=False):
             sys.exit(0)
         return (len(local_files), 0, 0)
@@ -1175,6 +1633,17 @@ def expand_files(
     is_flag=True,
     help="List all files and directories that are being ignored by exclude patterns and exit.",
 )
+@click.option(
+    "--max-workers",
+    default=5,
+    type=int,
+    help="Number of parallel upload workers for faster transfers (default: 5)",
+)
+@click.option(
+    "--ftp-active",
+    is_flag=True,
+    help="Use FTP active mode instead of passive mode (PASV). Passive mode is recommended for most networks.",
+)
 @click.argument("patterns", nargs=-1, required=False)
 def main(
     recursive,
@@ -1186,6 +1655,8 @@ def main(
     binding_alias,
     show_config,
     show_ignored,
+    max_workers,
+    ftp_active,
     patterns,
 ):
     """
@@ -1255,7 +1726,16 @@ def main(
                 sys.exit(1)
             click.echo(f"🔍 Auto-detected binding: {binding_alias}")
 
+        # Display root-level comment if present
+        if "comments" in config:
+            display_comment(config["comments"])
+
         host_config = get_host_config(config, binding_alias)
+
+        # Display binding comment if present
+        if "comments" in host_config:
+            display_comment(host_config["comments"], prefix="📝")
+
         local_basepath = Path(host_config["local_basepath"])
 
         if not local_basepath.exists():
@@ -1267,6 +1747,12 @@ def main(
         global_excludes = config.get("global_excludes", [])
         host_excludes = host_config.get("excludes", [])
         all_excludes = global_excludes + host_excludes
+
+        # Display excludes comments if present
+        if "global_excludes_comments" in config:
+            display_comment(config["global_excludes_comments"], prefix="🚫")
+        if "excludes_comments" in host_config:
+            display_comment(host_config["excludes_comments"], prefix="🚫")
 
         list_ignored_files(local_basepath, all_excludes, recursive)
         sys.exit(0)
@@ -1291,6 +1777,10 @@ def main(
             sys.exit(1)
         click.echo(f"🔍 Auto-detected binding: {binding_alias}")
 
+    # Display root-level comment if present
+    if "comments" in config:
+        display_comment(config["comments"])
+
     # Require patterns for upload operation
     if not patterns:
         click.echo(
@@ -1305,6 +1795,13 @@ def main(
 
     host_config = get_host_config(config, binding_alias)
 
+    # Display binding comment if present
+    if "comments" in host_config:
+        display_comment(host_config["comments"], prefix="📝")
+
+    # Add max_workers to host_config
+    host_config["max_workers"] = max_workers
+
     local_basepath = Path(host_config["local_basepath"])
     if not local_basepath.exists():
         click.echo(
@@ -1315,6 +1812,12 @@ def main(
     global_excludes = config.get("global_excludes", [])
     host_excludes = host_config.get("excludes", [])
     all_excludes = global_excludes + host_excludes
+
+    # Display excludes comments if present
+    if "global_excludes_comments" in config:
+        display_comment(config["global_excludes_comments"], prefix="🚫")
+    if "excludes_comments" in host_config:
+        display_comment(host_config["excludes_comments"], prefix="🚫")
 
     files_to_upload = expand_files(patterns, all_excludes, local_basepath, recursive)
 
@@ -1360,8 +1863,13 @@ def main(
 
         click.echo("")
 
+    # Start timer
+    start_time = time.time()
+
     if protocol == "ftp":
-        upload_ftp(host_config, files_to_upload, local_basepath)
+        upload_ftp(
+            host_config, files_to_upload, local_basepath, use_pasv=not ftp_active
+        )
     elif protocol == "sftp":
         upload_sftp(host_config, files_to_upload, local_basepath)
     else:
@@ -1370,7 +1878,25 @@ def main(
         )
         sys.exit(1)
 
+    # Calculate elapsed time
+    elapsed = time.time() - start_time
+    days = int(elapsed // 86400)
+    hours = int((elapsed % 86400) // 3600)
+    minutes = int((elapsed % 3600) // 60)
+    seconds = elapsed % 60
+
+    # Format time output
+    time_parts = []
+    if days > 0:
+        time_parts.append(f"{days}d")
+    if hours > 0 or days > 0:
+        time_parts.append(f"{hours}h")
+    if minutes > 0 or hours > 0 or days > 0:
+        time_parts.append(f"{minutes}m")
+    time_parts.append(f"{seconds:.2f}s")
+
     click.echo()
+    click.echo(f"⏱️  Upload completed in {' '.join(time_parts)}")
 
 
 if __name__ == "__main__":

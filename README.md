@@ -695,6 +695,10 @@ All visual check modes only scan files within the `remote_basepath` directory, n
 - `-b, --binding` - Binding alias from configuration. If omitted, auto-detects from current directory
 - `--show-config` - Display the merged configuration with source file annotations and exit
 - `--show-ignored` - List all files and directories that are being ignored by exclude patterns and exit
+- `--max-workers` - Number of parallel upload workers for faster transfers (default: 5)
+- `--ftp-active` - Use FTP active mode instead of passive mode (PASV). Passive mode is recommended for most networks.
+
+**Performance Note:** By default, `gsupload` uses 5 parallel workers with SSH compression (SFTP) and passive mode (FTP) for significantly faster uploads. See [PERFORMANCE.md](PERFORMANCE.md) for details.
 
 **Arguments:**
 - `PATTERNS` - One or more file patterns, filenames, or directories to upload
@@ -746,6 +750,13 @@ gsupload -vc -b=frontend "*.js"       # Faster check, skips listing remote-only 
 ```bash
 gsupload -f -b=frontend "*.css"       # Force mode: no confirmation, no remote check
 gsupload -nvcc -b=frontend "*.css"    # Disable visual check but still upload
+```
+
+**Parallel uploads (performance tuning):**
+```bash
+gsupload "*.css"                      # Default: 5 parallel workers
+gsupload --max-workers=10 "*.css"     # Use 10 workers for even faster uploads
+gsupload --max-workers=1 "*.css"      # Sequential (for debugging or unstable connections)
 ```
 
 **Non-recursive upload (current directory only):**
