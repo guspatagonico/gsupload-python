@@ -35,3 +35,7 @@ version_provider = "uv"
 update_changelog_on_bump = true
 major_version_zero = true
 breaking_change_exclamation_in_title = true
+# Extended pattern to accept 'chore' and 'revert' for backward compatibility
+# Note: These are not part of official Conventional Commits spec
+commit_parser = "^(?P<change_type>feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?:\\((?P<scope>[^)]+)\\))?!?:\\s(?P<message>.+)"
+change_type_order = ["BREAKING CHANGE", "Feat", "Fix", "Refactor", "Perf"]

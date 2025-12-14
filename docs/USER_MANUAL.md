@@ -1119,5 +1119,3 @@ For issues, feature requests, or questions:
 1. Check this manual and [README.md](../README.md)
 2. Review [Troubleshooting](#troubleshooting) section
 3. Open an issue in the repository
-
-🥑
