@@ -8,6 +8,10 @@
 - Especially effective for text files (HTML, CSS, JS, JSON, etc.)
 - **Expected speedup**: 2-5x for compressible files
 
+Notes:
+- Compression applies to the upload connections.
+- For some servers, connection retries may temporarily disable compression for compatibility.
+
 ### 2. **Smart Directory Caching**
 - Caches created directories in memory (set)
 - Avoids redundant `stat()` and `mkdir()` calls
@@ -16,7 +20,7 @@
 
 ### 3. **Parallel Uploads**
 - Uses `ThreadPoolExecutor` for concurrent file uploads
-- Default: 5 parallel workers (configurable with `--max-workers`)
+- Default: `max_workers` from the selected binding (or 5 if not set)
 - Each worker has its own FTP/SFTP connection
 - Thread-safe progress tracking
 - **Expected speedup**: 3-5x with default settings
@@ -31,15 +35,19 @@
 ### 5. **Configuration**
 You can customize the number of parallel workers:
 ```bash
-# Use default (5 workers)
-gsupload *.css
+# Use binding default (binding max_workers, or 5)
+gsupload "*.css"
 
-# Use more workers for faster uploads (if server allows)
-gsupload --max-workers=10 *.css
+# Override config for this run (CLI takes precedence)
+gsupload --max-workers=10 "*.css"
 
 # Use fewer workers for unstable connections
-gsupload --max-workers=1 *.css
+gsupload --max-workers=1 "*.css"
 ```
+
+Precedence:
+- `--max-workers` (CLI) overrides `max_workers` from JSON configuration.
+- If `--max-workers` is omitted, the binding `max_workers` is used.
 
 ## Protocol-Specific Optimizations
 
@@ -60,10 +68,10 @@ gsupload --max-workers=1 *.css
 Compare before/after with the same files:
 ```bash
 # Sequential (old behavior)
-time gsupload --max-workers=1 *.css
+time gsupload --max-workers=1 "*.css"
 
 # Parallel with compression (new default, 5 workers)
-time gsupload *.css
+time gsupload "*.css"
 ```
 
 ## Expected Results
@@ -85,3 +93,6 @@ Actual results depend on:
 - More workers isn't always better (diminishing returns after 5-7)
 - Some servers limit concurrent connections
 - Use `--max-workers=1` to disable parallelism for debugging
+
+Tip:
+- Always quote glob patterns so your shell doesn’t expand them before `gsupload` runs.
