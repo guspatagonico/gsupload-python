@@ -44,7 +44,7 @@ from typing import List, Dict, Any, Set, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
-__version__ = "1.0.1b1"
+__version__ = "1.0.1b2"
 DEFAULT_MAX_DEPTH = 20
 
 # Suppress paramiko's verbose error messages

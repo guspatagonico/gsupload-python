@@ -1,3 +1,10 @@
+## 1.0.1b2 (2025-12-15)
+
+### Fix
+
+- **git**: modify .gitignore
+- **cli**: make --max-workers override config; update dev install docs
+
 ## 1.0.1b1 (2025-12-14)
 
 ### Feat
