@@ -31,7 +31,7 @@ For development or if you prefer not to install globally:
 1.  Clone the repository.
 2.  Install dependencies:
     ```bash
-    uv pip install -r requirements.txt
+  uv pip install -e ".[dev]"
     ```
 3.  Run with:
     ```bash

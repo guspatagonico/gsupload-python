@@ -1705,9 +1705,9 @@ def version_callback(ctx, param, value):
 )
 @click.option(
     "--max-workers",
-    default=5,
+    default=None,
     type=int,
-    help="Number of parallel upload workers for faster transfers (default: 5)",
+    help="Number of parallel upload workers for faster transfers (overrides config; default: binding max_workers or 5)",
 )
 @click.option(
     "--ftp-active",
@@ -1884,9 +1884,14 @@ def main(
     if "comments" in host_config:
         display_comment(host_config["comments"], prefix="📝")
 
-    # Add max_workers to host_config (use binding config value if present, otherwise CLI value)
-    if "max_workers" not in host_config:
+    # Resolve max_workers with precedence:
+    # 1) explicit --max-workers (CLI)
+    # 2) binding config max_workers
+    # 3) fallback default (5)
+    if max_workers is not None:
         host_config["max_workers"] = max_workers
+    else:
+        host_config["max_workers"] = host_config.get("max_workers", 5)
 
     local_basepath = Path(host_config["local_basepath"])
     if not local_basepath.exists():

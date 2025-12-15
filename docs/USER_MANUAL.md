@@ -71,7 +71,7 @@ git clone git@github.com:guspatagonico/gsupload-python.git
 cd gsupload-python
 
 # Install dependencies
-uv pip install -r requirements.txt
+uv pip install -e ".[dev]"
 
 # Run directly
 python src/gsupload.py [OPTIONS] PATTERNS... HOST_ALIAS
