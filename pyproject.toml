@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gsupload"
-version = "1.0.0b0"
+version = "1.0.1b1"
 description = "Sync/upload files and folders to FTP/SFTP hosts using host aliases"
 requires-python = ">=3.9"
 dependencies = [

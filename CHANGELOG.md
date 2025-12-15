@@ -1,3 +1,9 @@
+## 1.0.1b1 (2025-12-14)
+
+### Feat
+
+- **cli**: show max_workers count in upload progress messages
+
 ## 1.0.0b0 (2025-12-14)
 
 ## 1.0.0a0 (2025-12-14)
