@@ -552,7 +552,8 @@ Each level can:
             "port": 22,
             "username": "user",
             "password": "password",
-            "key_filename": "/path/to/private/key", 
+            "key_filename": "/path/to/private/key",
+            "max_workers": 10,
             "local_basepath": "/Users/gustavo/dev/project",
             "remote_basepath": "/var/www/html"
         },
@@ -562,20 +563,69 @@ Each level can:
             "port": 21,
             "username": "admin",
             "password": "secretpassword",
+            "max_workers": 1,
             "local_basepath": "/Users/gustavo/dev/project/admin",
-            "remote_basepath": "/public_html/admin"
+            "remote_basepath": "/public_html/admin",
+            "comments": "FTP with conservative max_workers due to server connection limits"
         }
     }
 }
 ```
 
-**Notes:**
-- `key_filename` is optional for SFTP if you use password authentication
+**SFTP Authentication Methods:**
+
+1. **SSH Agent (recommended)**: Omit both `password` and `key_filename`
+   ```json
+   {
+     "protocol": "sftp",
+     "username": "user"
+     // No password or key_filename - uses SSH agent
+   }
+   ```
+
+2. **Password Authentication**: Provide only `password`
+   ```json
+   {
+     "protocol": "sftp",
+     "username": "user",
+     "password": "your-password"
+   }
+   ```
+
+3. **Unencrypted SSH Key**: Provide only `key_filename`
+   ```json
+   {
+     "protocol": "sftp",
+     "username": "user",
+     "key_filename": "/path/to/unencrypted_key"
+   }
+   ```
+
+4. **Encrypted SSH Key**: Provide both `key_filename` and `password`
+   ```json
+   {
+     "protocol": "sftp",
+     "username": "user",
+     "key_filename": "/path/to/encrypted_key",
+     "password": "key-passphrase"
+   }
+   ```
+   *Note: The `password` field serves dual purpose - SSH authentication password OR key passphrase when `key_filename` is provided*
+
+**Path Configuration:**
 - `local_basepath` can be:
   - **Absolute path**: `/full/path/to/directory`
   - **Relative path**: `.` (current config directory), `./dist`, `../sibling` (resolves relative to config file location)
   - **Omitted**: Defaults to the directory containing the config file
 - Using `.` or omitting `local_basepath` makes configs portable and easier to maintain
+
+**Performance Configuration:**
+- `max_workers` (optional): Number of parallel upload workers (default: 5)
+  - **SFTP**: Parallel uploads work reliably
+  - **FTP**: Parallel uploads may be limited or blocked by some servers (use 1-3 workers if issues occur)
+  - Higher values = faster uploads but more resource usage
+  - Recommended: 5-10 for SFTP, 1-3 for FTP
+  - Can be overridden with `--max-workers` CLI flag
 
 ### Excludes
 
@@ -695,7 +745,7 @@ All visual check modes only scan files within the `remote_basepath` directory, n
 - `-b, --binding` - Binding alias from configuration. If omitted, auto-detects from current directory
 - `--show-config` - Display the merged configuration with source file annotations and exit
 - `--show-ignored` - List all files and directories that are being ignored by exclude patterns and exit
-- `--max-workers` - Number of parallel upload workers for faster transfers (default: 5)
+- `--max-workers` - Number of parallel upload workers for faster transfers (default: 5, overrides binding config)
 - `--ftp-active` - Use FTP active mode instead of passive mode (PASV). Passive mode is recommended for most networks.
 
 **Performance Note:** By default, `gsupload` uses 5 parallel workers with SSH compression (SFTP) and passive mode (FTP) for significantly faster uploads. See [PERFORMANCE.md](PERFORMANCE.md) for details.
@@ -706,6 +756,20 @@ All visual check modes only scan files within the `remote_basepath` directory, n
 **⚠️ IMPORTANT: Always Quote Glob Patterns!**
 
 When using glob patterns (like `*.txt`, `*.css`, or `src/**/*.js`), you **MUST** quote them to prevent shell expansion. Without quotes, your shell will expand the pattern before `gsupload` sees it, which will cause unexpected behavior or errors.
+
+**Why quotes are necessary:**
+- Shell expansion happens **before** your program runs
+- By the time `gsupload` receives arguments, the shell has already expanded `*.css` to `file1.css file2.css`
+- Your program never sees the original pattern
+- This is fundamental to how all shells (bash, zsh, fish) work
+
+**This is standard practice across Unix tools:**
+- `find . -name "*.txt"` - requires quotes
+- `grep "pattern" *.log` - requires quotes for the pattern  
+- `git add "*.js"` - requires quotes
+- `rsync "*.css" remote:/path/` - requires quotes
+
+The requirement to quote patterns is correct and matches industry standards.
 
 ```bash
 # ✅ CORRECT - Pattern is quoted, gsupload handles the glob
@@ -718,7 +782,7 @@ gsupload -r *.txt       # Shell expands to: gsupload -r file1.txt file2.txt ...
 gsupload -r src/**/*.js # May fail or behave unexpectedly
 ```
 
-**Why this matters:** Without quotes, if you have `file1.txt` and `file2.txt` in your current directory and run `gsupload -r *.txt`, your shell will expand this to `gsupload -r file1.txt file2.txt`, which only uploads those two files instead of recursively finding all `.txt` files as intended.
+**Example:** Without quotes, if you have `file1.txt` and `file2.txt` in your current directory and run `gsupload -r *.txt`, your shell will expand this to `gsupload -r file1.txt file2.txt`, which only uploads those two files instead of recursively finding all `.txt` files as intended.
 
 ### Examples
 
@@ -754,9 +818,9 @@ gsupload -nvcc -b=frontend "*.css"    # Disable visual check but still upload
 
 **Parallel uploads (performance tuning):**
 ```bash
-gsupload "*.css"                      # Default: 5 parallel workers
-gsupload --max-workers=10 "*.css"     # Use 10 workers for even faster uploads
-gsupload --max-workers=1 "*.css"      # Sequential (for debugging or unstable connections)
+gsupload "*.css"                      # Default: 5 workers (or binding config value)
+gsupload --max-workers=10 "*.css"     # Override with 10 workers
+gsupload --max-workers=1 "*.css"      # Sequential (for debugging)
 ```
 
 **Non-recursive upload (current directory only):**

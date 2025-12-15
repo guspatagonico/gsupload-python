@@ -170,6 +170,7 @@ Configurations are **merged with inheritance** - deeper configs override shallow
       "username": "user",
       "password": "password",
       "key_filename": "/path/to/key",
+      "max_workers": 5,
       "local_basepath": "/local/path",
       "remote_basepath": "/remote/path",
       "excludes": ["pattern1", "pattern2"],
@@ -187,13 +188,26 @@ Configurations are **merged with inheritance** - deeper configs override shallow
 - `hostname` (required): Server hostname or IP
 - `port` (optional): Port number (default: 21 for FTP, 22 for SFTP)
 - `username` (required): Login username
-- `password` (optional): Login password (can use `key_filename` for SFTP instead)
+- `password` (optional): For SFTP, serves dual purpose:
+  - SSH password authentication (when `key_filename` is omitted)
+  - Passphrase to decrypt encrypted private key (when `key_filename` is provided)
+  - For FTP: Login password
 - `key_filename` (optional): Path to SSH private key (SFTP only)
+  - Can be encrypted (requires `password` as passphrase) or unencrypted
+  - If both `password` and `key_filename` are omitted, SSH agent authentication is used
 - `local_basepath` (optional): Local root directory. Can be:
   - Absolute path: `/full/path/to/directory`
   - Relative path: `.`, `./dist`, `../sibling` (resolves from config file location)
   - Omitted: Defaults to directory containing config file
 - `remote_basepath` (required): Remote root directory
+- `max_workers` (optional): Number of parallel upload workers (default: 5)
+  - **SFTP**: Parallel uploads work reliably with SSH multiplexing
+  - **FTP**: Some servers limit concurrent connections per IP or may reject parallel uploads
+    - Start with 1-2 workers for FTP and increase if server allows
+    - If you experience connection errors or rejections, reduce to 1 (sequential)
+  - Higher values increase upload speed but use more resources
+  - Recommended: 5-10 for SFTP, 1-3 for FTP
+  - Can be overridden with `--max-workers` CLI flag
 - `excludes` (optional): Binding-specific exclude patterns
 - `comments` (optional): Description displayed during operations
 
@@ -201,6 +215,105 @@ Configurations are **merged with inheritance** - deeper configs override shallow
 
 - `global_excludes` (optional): Exclude patterns applied to all bindings
 - `comments` (optional): Root-level description
+
+### SFTP Authentication Methods
+
+`gsupload` supports four authentication methods for SFTP connections:
+
+#### 1. SSH Agent (Recommended)
+
+Uses keys managed by your SSH agent (most secure, no credentials in config):
+
+```json
+{
+  "protocol": "sftp",
+  "hostname": "example.com",
+  "username": "user"
+  // No password or key_filename
+}
+```
+
+**Requirements:**
+- SSH agent running: `ssh-add -l` to verify
+- Key added to agent: `ssh-add ~/.ssh/id_rsa`
+
+**Advantages:**
+- ✅ No credentials stored in config files
+- ✅ Works with password-protected keys without storing passphrase
+- ✅ Ideal for team environments and version control
+
+#### 2. Password Authentication
+
+Uses password for SSH authentication:
+
+```json
+{
+  "protocol": "sftp",
+  "hostname": "example.com",
+  "username": "user",
+  "password": "your-ssh-password"
+}
+```
+
+**Use when:**
+- Server requires password authentication
+- SSH keys are not available
+
+**Security note:** Store passwords in global config outside version control
+
+#### 3. Unencrypted SSH Key
+
+Uses private key file without passphrase:
+
+```json
+{
+  "protocol": "sftp",
+  "hostname": "example.com",
+  "username": "user",
+  "key_filename": "~/.ssh/id_rsa"
+}
+```
+
+**Use when:**
+- Automated deployments (CI/CD)
+- Non-interactive scripts
+
+**Security note:** Unencrypted keys should have restricted permissions (`chmod 600`)
+
+#### 4. Encrypted SSH Key with Passphrase
+
+Uses password-protected private key:
+
+```json
+{
+  "protocol": "sftp",
+  "hostname": "example.com",
+  "username": "user",
+  "key_filename": "~/.ssh/id_rsa_encrypted",
+  "password": "key-passphrase"
+}
+```
+
+**How it works:**
+- The `password` field is used to decrypt the private key
+- After decryption, the key authenticates with the server
+- Most secure option when SSH agent is not available
+
+**Use when:**
+- Keys must be encrypted for security policy
+- SSH agent cannot be used
+- Personal deployments with encrypted keys
+
+**Important:** When `key_filename` is provided, `password` is interpreted as the key passphrase, NOT the SSH login password.
+
+#### Authentication Priority
+
+If multiple methods are configured, authentication attempts in this order:
+
+1. `key_filename` (if provided)
+2. SSH agent (if no `password` or `key_filename`)
+3. `password` (if provided without `key_filename`)
+4. SSH keys in default locations (`~/.ssh/id_rsa`, etc.)
 
 ### Example: Multi-Environment Setup
 
@@ -298,7 +411,21 @@ gsupload --show-config
 | `src/**/*.js` | JS files recursively in `src/` |
 | `index.html`  | Specific file                  |
 
-**Critical**: Always quote patterns to prevent shell expansion:
+**Critical: Always quote patterns to prevent shell expansion**
+
+**Why quotes are necessary:**
+- Shell expansion happens **before** your program runs
+- By the time `gsupload` receives arguments, the shell has already expanded `*.css` to `file1.css file2.css`  
+- Your program never sees the original pattern
+- This is fundamental to how all shells (bash, zsh, fish) work
+
+**This is standard practice across Unix tools:**
+- `find . -name "*.txt"` - requires quotes
+- `grep "pattern" *.log` - requires quotes for the pattern
+- `git add "*.js"` - requires quotes  
+- `rsync "*.css" remote:/path/` - requires quotes
+
+The requirement to quote patterns is correct and matches industry standards.
 
 ```bash
 # ✅ Correct
@@ -485,10 +612,10 @@ gsupload --show-config
 ### Performance Tuning
 
 ```bash
-# Default: 5 parallel workers
+# Use binding config or default (5 workers)
 gsupload "*.css"
 
-# More workers (faster, higher resource usage)
+# Override with more workers (faster, higher resource usage)
 gsupload --max-workers=10 "*.css"
 
 # Single worker (sequential, for debugging)
@@ -651,12 +778,69 @@ Fastest mode for CI/CD pipelines.
 
 Default: 5 parallel workers with SSH compression (SFTP) or passive mode (FTP).
 
+**Protocol-Specific Considerations:**
+
+- **SFTP**: Parallel uploads work reliably. SSH multiplexing handles concurrent connections efficiently.
+- **FTP**: Parallel uploads are supported but may be limited by server configuration:
+  - Some servers limit concurrent connections per IP address
+  - Some servers may reject or throttle parallel uploads
+  - **Recommendation**: Start with 1-2 workers for FTP, increase if no issues occur
+  - If you get connection errors, reduce `max_workers` to 1
+
+You can configure workers in two ways:
+
+#### 1. Per-Binding Configuration (Recommended)
+
+Set `max_workers` in binding config for consistent performance:
+
+```json
+{
+  "bindings": {
+    "production-sftp": {
+      "protocol": "sftp",
+      "hostname": "fast-server.com",
+      "max_workers": 10,  // SFTP handles many parallel connections
+      ...
+    },
+    "staging-sftp": {
+      "protocol": "sftp",
+      "hostname": "slow-server.com",
+      "max_workers": 3,   // Lower-capacity server
+      ...
+    },
+    "legacy-ftp": {
+      "protocol": "ftp",
+      "hostname": "ftp.example.com",
+      "max_workers": 1,   // Conservative for FTP (increase if server allows)
+      ...
+    }
+  }
+}
+```
+
+**Advantages:**
+- ✅ Different servers get optimal worker count automatically
+- ✅ Team members share same performance settings
+- ✅ No need to remember CLI flags
+
+#### 2. CLI Override
+
+Override binding config with CLI flag:
+
 ```bash
-# Adjust worker count based on server capacity
+# Use binding config value (or default 5)
+gsupload "*.css"
+
+# Override with CLI flag
 gsupload --max-workers=10 "*.css"  # High-speed connection
 gsupload --max-workers=3 "*.css"   # Slower connection
 gsupload --max-workers=1 "*.css"   # Debugging
 ```
+
+**When to use CLI override:**
+- Testing different worker counts
+- Temporary performance adjustments
+- Debugging connection issues
 
 **Performance impact**: See [PERFORMANCE.md](../PERFORMANCE.md) for benchmarks.
 
@@ -873,14 +1057,37 @@ A: FTP and SFTP. Configure with `"protocol": "ftp"` or `"protocol": "sftp"`.
 
 **Q: Can I use SSH keys instead of passwords?**
 
-A: Yes, for SFTP:
+A: Yes, SFTP supports multiple authentication methods:
 
-```json
-{
-  "protocol": "sftp",
-  "key_filename": "/path/to/private_key"
-}
-```
+1. **SSH Agent** (recommended - no credentials in config):
+   ```json
+   {
+     "protocol": "sftp",
+     "username": "user"
+     // Omit password and key_filename
+   }
+   ```
+
+2. **Unencrypted Key**:
+   ```json
+   {
+     "protocol": "sftp",
+     "username": "user",
+     "key_filename": "~/.ssh/id_rsa"
+   }
+   ```
+
+3. **Encrypted Key** (requires passphrase):
+   ```json
+   {
+     "protocol": "sftp",
+     "username": "user",
+     "key_filename": "~/.ssh/id_rsa_encrypted",
+     "password": "key-passphrase"
+   }
+   ```
+
+See [SFTP Authentication Methods](#sftp-authentication-methods) for details.
 
 **Q: How do I deploy to multiple environments?**
 
@@ -1060,23 +1267,40 @@ A: Yes, but less effective than SFTP due to FTP protocol limitations.
 
 **Q: How do I avoid storing passwords in config?**
 
-A:
+A: Use SSH agent authentication (most secure):
 
-1. Use SSH keys (SFTP):
-   ```json
-   {
-     "key_filename": "~/.ssh/id_rsa"
-   }
-   ```
+```json
+{
+  "protocol": "sftp",
+  "username": "user"
+  // No password or key_filename - uses SSH agent
+}
+```
 
-2. Use environment variables (requires manual editing):
-   ```json
-   {
-     "password": "$ENV_VAR"
-   }
-   ```
+**Setup:**
+```bash
+# Start SSH agent
+eval "$(ssh-agent -s)"
 
-   Then set `ENV_VAR` in your shell.
+# Add your key (enter passphrase once)
+ssh-add ~/.ssh/id_rsa
+
+# Verify key is loaded
+ssh-add -l
+```
+
+**Advantages:**
+- ✅ No credentials in config files
+- ✅ Works with encrypted keys
+- ✅ Passphrase entered once per session
+- ✅ Safe to commit config to version control
+
+**Alternative:** Use unencrypted keys (less secure):
+```json
+{
+  "key_filename": "~/.ssh/id_rsa"
+}
+```
 
 **Q: Are credentials sent securely?**
 

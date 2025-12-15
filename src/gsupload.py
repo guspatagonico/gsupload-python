@@ -44,6 +44,7 @@ from typing import List, Dict, Any, Set, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
+__version__ = "1.0.0a0"
 DEFAULT_MAX_DEPTH = 20
 
 # Suppress paramiko's verbose error messages
@@ -53,7 +54,7 @@ logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 def display_comment(comment: str, prefix: str = "💬"):
     """Display a comment with appropriate styling."""
     if comment:
-        click.echo(click.style(f"{prefix} {comment}", fg="cyan", dim=True))
+        click.echo(click.style(f"{prefix} {comment}", fg="cyan"))
 
 
 def load_config_with_sources() -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -783,7 +784,9 @@ def upload_ftp(
     username = host_config["username"]
     password = host_config["password"]
     remote_basepath = host_config["remote_basepath"]
-    max_workers = host_config.get("max_workers", 5)  # Parallel uploads
+    max_workers = host_config.get(
+        "max_workers", 5
+    )  # Parallel uploads (FTP servers may limit connections)
 
     # Sort files by depth (external first) then alphabetically
     def sort_key(f: Path):
@@ -852,7 +855,7 @@ def upload_ftp(
         except Exception as e:
             return (False, str(local_file), str(e))
 
-    click.echo("Uploading with parallel connections...")
+    click.echo(f"Uploading with parallel connections (max: {max_workers})...")
 
     # Upload files in parallel
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -919,6 +922,7 @@ def upload_sftp(host_config: Dict[str, Any], files: List[Path], local_basepath: 
                     port,
                     username,
                     key_filename=key_filename,
+                    password=password,  # Used as passphrase for encrypted keys
                     timeout=60,
                     compress=True,
                 )
@@ -965,7 +969,9 @@ def upload_sftp(host_config: Dict[str, Any], files: List[Path], local_basepath: 
             return (False, str(local_file), str(e))
 
     click.echo("✅ SFTP connection established")
-    click.echo("Uploading with compression + parallel connections...")
+    click.echo(
+        f"Uploading with compression + parallel connections (max: {max_workers})..."
+    )
 
     # Upload files in parallel
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1266,23 +1272,36 @@ def display_visual_comparison(
                             # First attempt: standard settings with longer timeout
                             timeout_value = 120
                             use_compression = True
-                            gss_auth = True
-                            look_for_keys = True
+                            gss_auth = False  # Disable to avoid GSS-API import errors
+                            gss_kex = False
+                            # Enable SSH agent if no password/key provided
+                            allow_agent = not password and not key_filename
+                            # Look for keys unless using password-only auth
+                            look_for_keys = not password or key_filename
+                            auth_method = (
+                                "agent"
+                                if allow_agent
+                                else ("key" if key_filename else "password")
+                            )
                             click.echo(
-                                "📡 Attempting connection with standard settings..."
+                                f"📡 Attempting connection with standard settings... (auth: {auth_method})"
                             )
                         elif retry_count == 1:
                             # Second attempt: disable compression (can cause issues)
                             timeout_value = 150
                             use_compression = False
-                            gss_auth = True
-                            look_for_keys = True
+                            gss_auth = False
+                            gss_kex = False
+                            allow_agent = not password and not key_filename
+                            look_for_keys = not password or key_filename
                             click.echo("⏳ Retry 1/3: Disabling compression...")
                         elif retry_count == 2:
                             # Third attempt: disable GSS-API auth (can cause delays)
                             timeout_value = 180
                             use_compression = False
                             gss_auth = False
+                            gss_kex = False
+                            allow_agent = not password and not key_filename
                             look_for_keys = False
                             click.echo(
                                 "⏳ Retry 2/3: Disabling GSS auth and key scanning..."
@@ -1292,6 +1311,8 @@ def display_visual_comparison(
                             timeout_value = 240
                             use_compression = False
                             gss_auth = False
+                            gss_kex = False
+                            allow_agent = not password and not key_filename
                             look_for_keys = False
                             click.echo("⏳ Retry 3/3: Maximum timeout (240s)...")
 
@@ -1301,13 +1322,15 @@ def display_visual_comparison(
                                 port=port,
                                 username=username,
                                 key_filename=key_filename,
+                                password=password,  # Used as passphrase for encrypted keys
                                 timeout=timeout_value,
                                 banner_timeout=timeout_value,
                                 auth_timeout=timeout_value,
                                 compress=use_compression,
                                 gss_auth=gss_auth,
-                                look_for_keys=look_for_keys,
-                                allow_agent=False,  # Disable SSH agent
+                                gss_kex=gss_kex,
+                                look_for_keys=bool(look_for_keys),
+                                allow_agent=bool(allow_agent),
                             )
                         else:
                             ssh.connect(
@@ -1320,8 +1343,9 @@ def display_visual_comparison(
                                 auth_timeout=timeout_value,
                                 compress=use_compression,
                                 gss_auth=gss_auth,
-                                look_for_keys=look_for_keys,
-                                allow_agent=False,  # Disable SSH agent
+                                gss_kex=gss_kex,
+                                look_for_keys=bool(look_for_keys),
+                                allow_agent=bool(allow_agent),
                             )
 
                         connection_successful = True
@@ -1331,6 +1355,7 @@ def display_visual_comparison(
                         paramiko.SSHException,
                         socket.timeout,
                         socket.error,
+                        ImportError,  # Handle GSS-API import errors
                     ) as conn_error:
                         retry_count += 1
                         if retry_count < max_retries:
@@ -1608,7 +1633,23 @@ def expand_files(
     return files
 
 
+def version_callback(ctx, param, value):
+    """Callback to display version and exit."""
+    if value and not ctx.resilient_parsing:
+        click.echo(f"gsupload version {__version__}")
+        ctx.exit()
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option(
+    "--version",
+    "-v",
+    is_flag=True,
+    callback=version_callback,
+    expose_value=False,
+    is_eager=True,
+    help="Show version and exit.",
+)
 @click.option(
     "-r/-nr",
     "--recursive/--no-recursive",
@@ -1699,21 +1740,26 @@ def main(
     \b
     PATTERNS can be:
       - Specific filenames: index.html style.css
-      - Glob patterns: *.css *.js
+      - Glob patterns: "*.css" "*.js" (MUST be quoted to prevent shell expansion)
       - Directories: src/assets (uploads all files in directory)
 
     \b
+    IMPORTANT: Always quote glob patterns!
+      Shell expansion happens BEFORE gsupload runs. Without quotes, your shell
+      expands *.css to file1.css file2.css, and gsupload never sees the pattern.
+
+    \b
     Examples:
-      gsupload *.css                                    # Auto-detect binding from current directory
-      gsupload -b=frontend *.css                        # Upload CSS files using 'frontend' binding
-      gsupload --binding=frontend *.css                 # Same as above (long form)
-      gsupload -r -b=frontend *.css                     # Upload CSS files recursively
-      gsupload -f -b=frontend *.css                     # Force upload without confirmation (fastest)
-      gsupload -vc -b=frontend *.css                    # Visual check (changes only) before upload
-      gsupload -vcc -b=frontend *.css                   # Visual check with complete tree
-      gsupload -vc -r -b=backend *.js                   # Visual check for recursive JS file upload
-      gsupload -vc --max-depth=5 -r -b=admin *.html     # Visual check with custom tree depth
-      gsupload -vc -ts -b=frontend *.css                # Show summary only, no tree display
+      gsupload "*.css"                                  # Auto-detect binding (quotes required!)
+      gsupload -b=frontend "*.css"                      # Upload CSS files using 'frontend' binding
+      gsupload --binding=frontend "*.css"               # Same as above (long form)
+      gsupload -r -b=frontend "*.css"                   # Upload CSS files recursively
+      gsupload -f -b=frontend "*.css"                   # Force upload without confirmation (fastest)
+      gsupload -vc -b=frontend "*.css"                  # Visual check (changes only) before upload
+      gsupload -vcc -b=frontend "*.css"                 # Visual check with complete tree
+      gsupload -vc -r -b=backend "*.js"                 # Visual check for recursive JS file upload
+      gsupload -vc --max-depth=5 -r -b=admin "*.html"   # Visual check with custom tree depth
+      gsupload -vc -ts -b=frontend "*.css"              # Show summary only, no tree display
       gsupload -b=frontend src/assets                   # Upload all files in src/assets directory
       gsupload -b=backend index.html app.js             # Upload specific files to backend host
 
@@ -1721,11 +1767,21 @@ def main(
     Configuration:
       The script looks for configuration file in this order:
         1. Looks for .gsupload.json in the current directory and parent directories (walks up until found). Filename starts with dot (".") on purpose.
-        2. ~/.gsupload/gsupload.json (no dot file)
-        3. ~/.config/gsupload/gsupload.json (no dot file)
+        2. ~/.gsupload/gsupload.json (no dot file, on purpose)
+        3. ~/.config/gsupload/gsupload.json (no dot file, on purpose)
+
+    \b
+    Created by Gustavo Adrián Salvini - @guspatagonico - https://gustavosalvini.com.ar
+    Licensed under the MIT License - free to use, modify, and distribute.
 
     """
     click.echo()
+
+    # Show help if no arguments provided
+    if not patterns and not show_config and not show_ignored:
+        ctx = click.get_current_context()
+        click.echo(ctx.get_help())
+        ctx.exit()
 
     # Handle --show-config flag
     if show_config:
@@ -1828,8 +1884,9 @@ def main(
     if "comments" in host_config:
         display_comment(host_config["comments"], prefix="📝")
 
-    # Add max_workers to host_config
-    host_config["max_workers"] = max_workers
+    # Add max_workers to host_config (use binding config value if present, otherwise CLI value)
+    if "max_workers" not in host_config:
+        host_config["max_workers"] = max_workers
 
     local_basepath = Path(host_config["local_basepath"])
     if not local_basepath.exists():
