@@ -30,13 +30,17 @@ For development or if you prefer not to install globally:
 
 1.  Clone the repository.
 2.  Install dependencies:
-    ```bash
-  uv pip install -e ".[dev]"
-    ```
+
+```bash
+uv pip install -e ".[dev]"
+```
+
 3.  Run with:
-    ```bash
-    python src/gsupload.py [OPTIONS] PATTERNS... HOST_ALIAS
-    ```
+ 
+```
+bash
+python src/gsupload.py [OPTIONS] PATTERNS... HOST_ALIAS
+```
 
 ## Configuration
 

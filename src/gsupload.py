@@ -267,7 +267,7 @@ def display_config(merged_config: Dict[str, Any], source_map: Dict[str, Any]) ->
         for pattern, sources in source_map["global_excludes"].items():
             sources_str = ", ".join(str(s) for s in sources)
             click.echo(f"    • {click.style(pattern, fg='white')}")
-            click.echo(f"      ↳ from: {click.style(sources_str, fg='blue', dim=True)}")
+            click.echo(f"      ↳ from: {click.style(sources_str, fg='blue')}")
 
     # Bindings
     if source_map.get("bindings"):
