@@ -7,22 +7,16 @@ name = "gsupload"
 version = "1.0.1b2"
 description = "Sync/upload files and folders to FTP/SFTP hosts using host aliases"
 requires-python = ">=3.9"
-dependencies = [
-  "click>=8.1.0",
-  "paramiko>=3.0.0",
-]
+dependencies = ["click>=8.1.0", "paramiko>=3.0.0"]
 
 [project.scripts]
-gsupload = "gsupload:main"
+gsupload = "gsupload.cli:main"
 
 [project.optional-dependencies]
-dev = [
-    "commitizen",
-    "pre-commit"
-]
+dev = ["commitizen", "pre-commit", "pytest>=8.0.0", "pytest-cov>=4.0.0"]
 
-[tool.setuptools]
-py-modules = ["gsupload"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
@@ -36,6 +30,12 @@ update_changelog_on_bump = true
 major_version_zero = true
 breaking_change_exclamation_in_title = true
 version_files = [
-    "pyproject.toml:version",
-    "src/gsupload.py:__version__"
+  "pyproject.toml:version",
+  "src/gsupload/__init__.py:__version__",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

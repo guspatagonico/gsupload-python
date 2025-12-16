@@ -58,6 +58,54 @@ gsupload --help
 
 After installation, `gsupload` is available from any directory without activating a virtual environment.
 
+### Uninstalling
+
+Remove the global tool installation:
+
+```bash
+uv tool uninstall gsupload
+```
+
+### Updating an Existing Installation
+
+If you have a previous installation (via pip or an older uv tool version), follow these steps:
+
+```bash
+# 1. Remove old pip installation (if any)
+pip3 uninstall gsupload -y
+
+# 2. Remove any leftover executables from pip's bin directory
+rm -f ~/Library/Python/3.9/bin/gsupload   # macOS
+# or
+rm -f ~/.local/bin/gsupload               # Linux (if pip-installed)
+
+# 3. Uninstall current uv tool version
+uv tool uninstall gsupload
+
+# 4. Clear shell command cache
+hash -r
+
+# 5. Install fresh version
+uv tool install --editable /path/to/gsupload-python
+
+# 6. Verify installation
+which gsupload      # Should show ~/.local/bin/gsupload
+gsupload --version  # Should show current version
+```
+
+**Why this is necessary:**
+
+- Old pip installations place executables in a different location than uv tools
+- Shell caches command paths, so `hash -r` forces a refresh
+- The old executable may shadow the new one if both exist
+
+**Quick update** (no conflicting installations):
+
+```bash
+uv tool uninstall gsupload
+uv tool install --editable /path/to/gsupload-python
+```
+
 ### Option 2: Local Development Setup
 
 For development or testing:
