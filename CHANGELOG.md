@@ -1,3 +1,38 @@
+## 2.0.0 (2025-12-16)
+
+### BREAKING CHANGE
+
+- Entry point changed from `gsupload:main` to `gsupload.cli:main`
+- Version location moved from `gsupload.py:__version__` to `gsupload/__init__.py:__version__`
+
+### Refactor
+
+- **architecture**: restructure from single-file monolith to modular package
+  - Extract `config.py` - configuration loading, merging, validation
+  - Extract `excludes.py` - file exclusion patterns and directory walking
+  - Extract `utils.py` - shared utility functions
+  - Extract `tree.py` - visual tree comparison display
+  - Extract `protocols/ftp.py` - FTP protocol implementation
+  - Extract `protocols/sftp.py` - SFTP protocol implementation
+  - Extract `cli.py` - Click CLI commands and argument parsing
+
+### Added
+
+- **test**: add comprehensive test scaffold with pytest (46 tests)
+  - `test_cli.py` - CLI integration tests
+  - `test_config.py` - configuration tests
+  - `test_excludes.py` - exclusion pattern tests
+  - `test_protocols_ftp.py` - FTP protocol tests
+  - `test_protocols_sftp.py` - SFTP protocol tests
+  - `test_tree.py` - tree display tests
+  - `test_utils.py` - utility function tests
+- **docs**: add ARCHITECTURE.md with module diagrams and data flow
+- **docs**: add installation/update/uninstall instructions to USER_MANUAL.md
+
+### Changed
+
+- **deps**: add pytest and pytest-cov as dev dependencies
+
 ## 1.0.1b2 (2025-12-15)
 
 ### Fix

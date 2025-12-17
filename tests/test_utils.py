@@ -3,7 +3,6 @@ Tests for gsupload.utils module.
 """
 
 from pathlib import Path
-from typing import List
 
 import pytest
 

@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 class TestListRemoteFtp:
     """Tests for list_remote_ftp function."""

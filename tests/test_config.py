@@ -13,7 +13,6 @@ from gsupload.config import (
     auto_detect_binding,
     get_host_config,
     load_config,
-    load_config_with_sources,
 )
 
 

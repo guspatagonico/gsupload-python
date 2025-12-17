@@ -18,8 +18,8 @@ from gsupload.config import (
     get_host_config,
     load_config,
     load_config_with_sources,
-    show_config,
 )
+
 from gsupload.excludes import show_ignored_files
 from gsupload.protocols.ftp import upload_ftp
 from gsupload.protocols.sftp import upload_sftp
