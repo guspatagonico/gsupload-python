@@ -1,0 +1,57 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "agentlint": {
+      "type": "local",
+      "command": ["npx", "-y", "@agent-lint/mcp"],
+      "enabled": true,
+    },
+  },
+  "agent": {
+    "orchestrator": {
+      "description": "Breaks down complex tasks into smaller parallel subtasks and dispatches to specialized agents",
+      "mode": "subagent",
+      "tools": {
+        "write": false,
+        "edit": false,
+        "bash": false,
+      },
+    },
+    "component-builder": {
+      "description": "Creates new React and Astro components following project conventions",
+      "mode": "subagent",
+      "tools": {
+        "write": true,
+        "edit": true,
+        "bash": true,
+      },
+    },
+    "blog-writer": {
+      "description": "Creates new blog posts following the project blog post layout convention",
+      "mode": "subagent",
+      "tools": {
+        "write": true,
+        "edit": true,
+        "bash": false,
+      },
+    },
+    "tester": {
+      "description": "Writes tests for components and utilities using Vitest",
+      "mode": "subagent",
+      "tools": {
+        "write": true,
+        "edit": true,
+        "bash": true,
+      },
+    },
+    "project-leader": {
+      "description": "Takes notes about the project and creates high-level plans for the Plan agent",
+      "mode": "primary",
+      "tools": {
+        "write": true,
+        "edit": true,
+        "bash": false,
+      },
+    },
+  },
+}

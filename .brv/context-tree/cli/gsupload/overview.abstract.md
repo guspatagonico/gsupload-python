@@ -1,0 +1,1 @@
+The gsupload CLI merges layered configs, resolves bindings, processes ignore rules, enumerates FTP/SFTP remotes, and uploads files with cached directory creation.

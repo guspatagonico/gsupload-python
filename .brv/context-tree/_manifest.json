@@ -1,0 +1,49 @@
+{
+  "active_context": [
+    {
+      "order": 3,
+      "path": "_index.md",
+      "tokens": 310,
+      "type": "summary"
+    },
+    {
+      "path": "cli/_index.md",
+      "tokens": 423,
+      "type": "summary"
+    },
+    {
+      "path": "cli/gsupload/_index.md",
+      "tokens": 395,
+      "type": "summary"
+    },
+    {
+      "abstractPath": "cli/gsupload/overview.abstract.md",
+      "abstractTokens": 41,
+      "importance": 62,
+      "path": "cli/gsupload/overview.md",
+      "tokens": 41,
+      "type": "context"
+    },
+    {
+      "importance": 50,
+      "path": "cli/context.md",
+      "tokens": 164,
+      "type": "context"
+    },
+    {
+      "importance": 50,
+      "path": "cli/gsupload/context.md",
+      "tokens": 113,
+      "type": "context"
+    }
+  ],
+  "generated_at": "2026-04-14T18:21:46.821Z",
+  "lane_tokens": {
+    "contexts": 318,
+    "stubs": 0,
+    "summaries": 1128
+  },
+  "source_fingerprint": "38be940620e992a54891254cdeb469b2a17f630ee9fb20696887b9423b0553d7",
+  "total_tokens": 1446,
+  "version": 1
+}

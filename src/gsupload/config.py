@@ -253,8 +253,9 @@ def show_config(merged_config: Dict[str, Any], source_map: Dict[str, Any]) -> No
             if binding_info.get("properties"):
                 for prop, sources in binding_info["properties"].items():
                     sources_str = ", ".join(str(s) for s in sources)
+                    arrow = click.style(" ← ", fg="yellow")
                     click.echo(
-                        f"        - {click.style(prop, fg='magenta')}: from {click.style(sources_str, fg='blue', dim=True)}"
+                        f"        - {click.style(prop, fg='magenta')}{arrow}{click.style(sources_str, fg='blue', dim=True)}"
                     )
 
 
