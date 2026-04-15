@@ -14,7 +14,7 @@ from gsupload.config import load_config, load_config_with_sources, get_host_conf
 from gsupload.protocols.ftp import upload_ftp, list_remote_ftp
 from gsupload.protocols.sftp import upload_sftp, list_remote_sftp
 
-__version__ = "1.0.1b2"
+__version__ = "1.0.1b3"
 DEFAULT_MAX_DEPTH = 20
 
 __all__ = [

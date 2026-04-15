@@ -1,3 +1,13 @@
+## 1.0.1b3 (2026-04-15)
+
+### Fix
+
+- **binding**: correct explicit binding selection during config resolution
+
+### Changed
+
+- **cli**: polish `--show-config` output formatting
+
 ## 2.0.0 (2025-12-16)
 
 ### BREAKING CHANGE

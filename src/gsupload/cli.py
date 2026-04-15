@@ -174,11 +174,9 @@ def main(
     """
     click.echo()
 
-    # Show help if no arguments provided
+    # Require patterns unless inspecting config or ignores
     if not patterns and not show_config and not show_ignored:
-        ctx = click.get_current_context()
-        click.echo(ctx.get_help())
-        ctx.exit()
+        raise click.UsageError("Missing argument 'PATTERNS...'.")
 
     # Handle --show-config flag
     if show_config:
@@ -264,18 +262,6 @@ def main(
     # Display root-level comment if present
     if "comments" in config:
         display_comment(config["comments"])
-
-    # Require patterns for upload operation
-    if not patterns:
-        click.echo(
-            "Error: No file patterns specified. Please provide file patterns to upload.",
-            err=True,
-        )
-        click.echo("Examples:", err=True)
-        click.echo("  gsupload '*.css'", err=True)
-        click.echo("  gsupload 'src/**/*.js'", err=True)
-        click.echo("  gsupload index.html style.css", err=True)
-        sys.exit(1)
 
     host_config = get_host_config(config, binding_alias)
 
